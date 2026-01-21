@@ -9,10 +9,11 @@ use ostd::sync::RwMutexUpgradeableGuard;
 use super::{Common, ProcFs};
 use crate::{
     fs::{
+        inode_handle::FileIo,
         path::{is_dot, is_dotdot},
         utils::{
-            DirEntryVecExt, DirentVisitor, Extension, FileSystem, Inode, InodeIo, InodeMode,
-            InodeType, Metadata, MknodType, StatusFlags,
+            AccessMode, DirEntryVecExt, DirentVisitor, Extension, FileSystem, Inode, InodeIo,
+            InodeMode, InodeType, Metadata, MknodType, StatusFlags,
         },
     },
     prelude::*,
@@ -127,6 +128,14 @@ impl<D: DirOps + 'static> Inode for ProcDir<D> {
         Err(Error::new(Errno::EPERM))
     }
 
+    fn open(
+        &self,
+        access_mode: AccessMode,
+        status_flags: StatusFlags,
+    ) -> Option<Result<Box<dyn FileIo>>> {
+        self.inner.open(access_mode, status_flags)
+    }
+
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
         let try_readdir = |offset: &mut usize, visitor: &mut dyn DirentVisitor| -> Result<()> {
             // Read the two special entries.
@@ -223,6 +232,14 @@ pub trait DirOps: Sync + Send + Sized {
     #[must_use]
     fn validate_child(&self, _child: &dyn Inode) -> bool {
         true
+    }
+
+    fn open(
+        &self,
+        _access_mode: AccessMode,
+        _status_flags: StatusFlags,
+    ) -> Option<Result<Box<dyn FileIo>>> {
+        None
     }
 }
 

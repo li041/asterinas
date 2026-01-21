@@ -6,12 +6,12 @@ use aster_util::slot_vec::SlotVec;
 use ostd::sync::RwMutexUpgradeableGuard;
 use template::{lookup_child_from_table, populate_children_from_table};
 
+pub use self::pid::PidDirOps;
 use self::{
     cmdline::CmdLineFileOps,
     cpuinfo::CpuInfoFileOps,
     loadavg::LoadAvgFileOps,
     meminfo::MemInfoFileOps,
-    pid::PidDirOps,
     self_::SelfSymOps,
     sys::SysDirOps,
     template::{DirOps, ProcDir, ProcDirBuilder, ProcSymBuilder, SymOps},

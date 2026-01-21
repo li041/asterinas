@@ -77,6 +77,10 @@ impl InodeHandle {
         &self.path
     }
 
+    pub fn file_io(&self) -> Option<&dyn FileIo> {
+        self.file_io.as_deref()
+    }
+
     pub fn offset(&self) -> usize {
         let offset = self.offset.lock();
         *offset
@@ -518,6 +522,12 @@ pub trait FileIo: Pollable + InodeIo + Any + Send + Sync + 'static {
 
     fn ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
         return_errno_with_message!(Errno::ENOTTY, "ioctl is not supported");
+    }
+}
+
+impl dyn FileIo {
+    pub fn downcast_ref<T: FileIo>(&self) -> Option<&T> {
+        (self as &dyn Any).downcast_ref::<T>()
     }
 }
 

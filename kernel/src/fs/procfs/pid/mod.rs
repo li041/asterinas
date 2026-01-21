@@ -7,17 +7,23 @@ use super::template::{
     DirOps, ProcDir, ProcDirBuilder, lookup_child_from_table, populate_children_from_table,
 };
 use crate::{
+    events::IoEvents,
     fs::{
+        inode_handle::FileIo,
         procfs::pid::task::{TaskDirOps, TidDirOps},
-        utils::{Inode, mkmod},
+        utils::{Inode, InodeIo, StatusFlags, mkmod},
     },
     prelude::*,
-    process::Process,
+    process::{
+        Process,
+        signal::{PollHandle, Pollable},
+    },
 };
 
 mod task;
 
 /// Represents the inode at `/proc/[pid]`.
+#[derive(Clone)]
 pub struct PidDirOps(
     // The `/proc/<pid>` directory is a superset of the `/proc/<pid>/task/<tid>` directory.
     // So we embed `TidDirOps` here so that `PidDirOps` can "inherit" entries and methods
@@ -38,6 +44,10 @@ impl PidDirOps {
             .volatile()
             .build()
             .unwrap()
+    }
+
+    pub fn process(&self) -> Arc<Process> {
+        self.0.process_ref.clone()
     }
 
     #[expect(clippy::type_complexity)]
@@ -86,5 +96,49 @@ impl DirOps for PidDirOps {
             .populate_children_locked(&mut cached_children, dir.this_weak().clone());
 
         cached_children.downgrade()
+    }
+
+    fn open(
+        &self,
+        _access_mode: crate::fs::utils::AccessMode,
+        _status_flags: crate::fs::utils::StatusFlags,
+    ) -> Option<Result<Box<dyn crate::fs::inode_handle::FileIo>>> {
+        Some(Ok(Box::new(self.clone())))
+    }
+}
+
+impl Pollable for PidDirOps {
+    fn poll(&self, _mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
+        IoEvents::empty()
+    }
+}
+
+impl InodeIo for PidDirOps {
+    fn read_at(
+        &self,
+        _offset: usize,
+        _writer: &mut VmWriter,
+        _status_flags: StatusFlags,
+    ) -> Result<usize> {
+        Err(Error::new(Errno::EISDIR))
+    }
+
+    fn write_at(
+        &self,
+        _offset: usize,
+        _reader: &mut VmReader,
+        _status_flags: StatusFlags,
+    ) -> Result<usize> {
+        Err(Error::new(Errno::EISDIR))
+    }
+}
+
+impl FileIo for PidDirOps {
+    fn check_seekable(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn is_offset_aware(&self) -> bool {
+        false
     }
 }

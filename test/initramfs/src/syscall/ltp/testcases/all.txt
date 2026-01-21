@@ -1049,8 +1049,8 @@ pidfd_open02
 pidfd_open03
 pidfd_open04
 
-# pidfd_send_signal01
-# pidfd_send_signal02
+pidfd_send_signal01
+pidfd_send_signal02
 # pidfd_send_signal03
 
 pipe01
