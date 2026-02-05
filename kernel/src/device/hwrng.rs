@@ -23,16 +23,13 @@ struct HwRngHandle {
     rng: Arc<EntropyDevice>,
 }
 
-struct HwRngDevice {
-    handle: Option<HwRngHandle>,
-}
-
-impl HwRngDevice {
-    pub fn new(rng: Option<Arc<EntropyDevice>>) -> Self {
-        let handle = rng.map(|rng| HwRngHandle { rng });
-        HwRngDevice { handle }
+impl HwRngHandle {
+    pub fn new(rng: Arc<EntropyDevice>) -> Self {
+        Self { rng }
     }
 }
+
+struct HwRngDevice;
 
 impl Device for HwRngDevice {
     fn type_(&self) -> DeviceType {
@@ -49,13 +46,12 @@ impl Device for HwRngDevice {
     }
 
     fn open(&self) -> Result<Box<dyn FileIo>> {
-        match &self.handle {
-            Some(handle) => Ok(Box::new(handle.clone())),
-            None => Err(Error::with_message(
-                Errno::ENODEV,
-                "No hardware RNG device found",
-            )),
-        }
+        let device = all_devices()
+            .first()
+            .cloned()
+            .ok_or_else(|| Error::with_message(Errno::ENODEV, "No hardware RNG device found"))?;
+
+        Ok(Box::new(HwRngHandle::new(device)))
     }
 }
 
@@ -111,8 +107,7 @@ impl FileIo for HwRngHandle {
 }
 
 pub(super) fn init_in_first_process() -> Result<()> {
-    let rng_devices = all_devices();
-    char::register(Arc::new(HwRngDevice::new(rng_devices.first().cloned())))?;
+    char::register(Arc::new(HwRngDevice))?;
 
     Ok(())
 }
