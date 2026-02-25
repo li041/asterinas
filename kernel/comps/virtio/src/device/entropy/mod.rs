@@ -41,7 +41,9 @@ pub fn register_recv_callback(callback: impl EntropyDeviceIrqHandler) {
 }
 
 pub fn handle_recv_irq(_: &TrapFrame) {
-    ENTROPY_DEVICE_CALLBACK.get().unwrap()()
+    if let Some(callback) = ENTROPY_DEVICE_CALLBACK.get() {
+        callback()
+    }
 }
 
 pub fn init() {

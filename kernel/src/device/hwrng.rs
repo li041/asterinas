@@ -8,7 +8,7 @@ use aster_virtio::device::entropy::{
     get_device, register_recv_callback,
 };
 use device_id::{DeviceId, MajorId, MinorId};
-use ostd::mm::{VmReader, VmWriter, io_util::HasVmReaderWriter};
+use ostd::mm::{VmReader, VmWriter};
 
 use crate::{
     device::registry::char,
@@ -20,23 +20,14 @@ use crate::{
     },
     prelude::*,
     process::signal::{PollHandle, Pollable, Pollee},
-    util::ring_buffer::RingBuffer,
 };
 
 static HW_RNG_HANDLE: Mutex<Option<Arc<HwRngHandle>>> = Mutex::new(None);
-
-const HW_RNG_BUFFER_CAPACITY: usize = 4096;
 
 #[derive(Clone)]
 struct HwRngHandle {
     rng: Arc<EntropyDevice>,
     pollee: Pollee,
-    recv_state: Arc<SpinLock<HwRngRecvState>>,
-}
-
-struct HwRngRecvState {
-    buffer: RingBuffer<u8>,
-    in_flight: bool,
 }
 
 impl HwRngHandle {
@@ -44,98 +35,27 @@ impl HwRngHandle {
         Self {
             rng,
             pollee: Pollee::new(),
-            recv_state: Arc::new(SpinLock::new(HwRngRecvState {
-                buffer: RingBuffer::new(HW_RNG_BUFFER_CAPACITY),
-                in_flight: false,
-            })),
         }
     }
 
     pub fn check_io_events(&self) -> IoEvents {
         let mut events = IoEvents::empty();
 
-        if !self.recv_state.lock().buffer.is_empty() {
+        if self.rng.can_pop() {
             events |= IoEvents::IN;
         }
 
         events
     }
 
-    fn activate_receive_buffer(&self) {
-        let should_activate = {
-            let mut state = self.recv_state.disable_irq().lock();
-            if state.in_flight || state.buffer.is_full() {
-                return;
-            }
-            state.in_flight = true;
-            true
-        };
-
-        if should_activate {
-            let mut request_queue = self.rng.request_queue.disable_irq().lock();
-            self.rng
-                .activate_receive_buffer(&mut request_queue, PAGE_SIZE);
-        }
-    }
-
     fn handle_recv_irq(&self) {
-        let mut request_queue = self.rng.request_queue.disable_irq().lock();
-        let Ok((_, used_len)) = request_queue.pop_used() else {
-            return;
-        };
-        drop(request_queue);
-
-        let used_len = used_len as usize;
-        self.rng
-            .receive_buffer
-            .sync_from_device(0..used_len)
-            .unwrap();
-
-        let (wrote, should_activate) = {
-            let mut state = self.recv_state.disable_irq().lock();
-            let free_len = state.buffer.free_len();
-            let read_len = used_len.min(free_len);
-
-            let mut wrote = 0;
-            if read_len > 0 {
-                let mut reader = self.rng.receive_buffer.reader().unwrap();
-                reader.limit(read_len);
-
-                let mut tmp = vec![0u8; read_len];
-                let mut writer = VmWriter::from(tmp.as_mut_slice());
-                wrote = reader.read(&mut writer);
-                state.buffer.push_slice(&tmp[..wrote]).unwrap();
-            }
-            state.in_flight = false;
-
-            let should_activate = if state.buffer.is_full() {
-                false
-            } else {
-                state.in_flight = true;
-                true
-            };
-
-            (wrote, should_activate)
-        };
-
-        if wrote > 0 {
-            self.pollee.notify(IoEvents::IN);
-        }
-
-        if should_activate {
-            let mut request_queue = self.rng.request_queue.disable_irq().lock();
-            self.rng
-                .activate_receive_buffer(&mut request_queue, PAGE_SIZE);
-        }
+        self.pollee.notify(IoEvents::IN);
     }
 
     fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
-        let mut state = self.recv_state.disable_irq().lock();
-        if state.buffer.is_empty() {
-            return_errno_with_message!(Errno::EAGAIN, "entropy buffer is not ready");
-        }
-
-        state.buffer.read_fallible(writer)
+        self.rng
+            .try_read(writer)
+            .map_err(|(err, _bytes)| Error::from(err))
     }
 }
 
@@ -206,8 +126,6 @@ impl InodeIo for HwRngHandle {
         let is_nonblocking = status_flags.contains(StatusFlags::O_NONBLOCK);
 
         while written_bytes < len {
-            self.activate_receive_buffer();
-
             let read_once = if is_nonblocking {
                 self.try_read(writer)
             } else {
