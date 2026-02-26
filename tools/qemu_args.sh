@@ -118,6 +118,10 @@ QEMU_ARGS="\
     -machine q35,kernel-irqchip=split \
     -device virtio-blk-pci,bus=pcie.0,addr=0x6,drive=x0,serial=vext2,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
     -device virtio-blk-pci,bus=pcie.0,addr=0x7,drive=x1,serial=vexfat,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
+    -object memory-backend-memfd,id=mem0,size=${MEM:-8G},share=on \
+    -numa node,memdev=mem0 \
+    -chardev socket,id=char0,path=/tmp/vhostqemu/vfs.sock \
+    -device vhost-user-fs-pci,chardev=char0,tag=myfs \
     -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off$VIRTIO_NET_FEATURES$IOMMU_DEV_EXTRA \
     -device virtio-serial-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
     $CONSOLE_ARGS \

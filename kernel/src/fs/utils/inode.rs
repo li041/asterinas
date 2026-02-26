@@ -385,6 +385,16 @@ pub trait Inode: Any + InodeIo + Send + Sync {
         true
     }
 
+    /// Revalidates a cached VFS dentry backed by this inode.
+    ///
+    /// Returning `Ok(())` means the filesystem has guaranteed that the cached dentry
+    /// is still valid (possibly after a filesystem-specific refresh).
+    /// Returning `Err(_)` means the cached dentry cannot be used and the error should
+    /// be returned directly to the caller.
+    fn revalidate_dentry(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Returns the end position for [`SeekFrom::End`].
     ///
     /// [`SeekFrom::End`]: super::SeekFrom::End

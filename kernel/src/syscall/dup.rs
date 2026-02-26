@@ -67,8 +67,14 @@ fn do_dup3(
     }
 
     let file_table = ctx.thread_local.borrow_file_table();
+
+    let file = {
+        let mut file_table_locked = file_table.unwrap().write();
+        file_table_locked.close_file(new_fd).unwrap()
+    };
+    drop(file);
+
     let mut file_table_locked = file_table.unwrap().write();
-    let _ = file_table_locked.close_file(new_fd);
     let new_fd = file_table_locked.dup(old_fd, new_fd, flags)?;
 
     Ok(SyscallReturn::Return(new_fd as _))

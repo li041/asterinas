@@ -281,7 +281,13 @@ impl DirDentry<'_> {
     /// Lookups a target `Dentry` from the cache in children.
     pub(super) fn lookup_via_cache(&self, name: &str) -> Result<Option<Arc<Dentry>>> {
         let children = self.children.read();
-        children.find(name)
+        match children.find(name)? {
+            Some(child) => {
+                child.inode().revalidate_dentry()?;
+                Ok(Some(child))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Lookups a target `Dentry` from the file system.
@@ -357,19 +363,23 @@ impl DirDentry<'_> {
         let cached_child = children.delete(name);
 
         let dir_inode = &self.inode;
-        let child_inode = match cached_child {
-            Some(child) => {
-                // Cache hit: use the cached dentry
-                child.inode().clone()
-            }
-            None => {
-                // Cache miss: need to lookup from the underlying filesystem
-                drop(children);
-                dir_inode.lookup(name)?
-            }
-        };
+        let child_inode = if let Some(child) = cached_child {
+            let child_inode = child.inode().clone();
 
-        dir_inode.unlink(name)?;
+            dir_inode.unlink(name).or_else(|err| {
+                children.insert(name.to_string(), child);
+                Err(err)
+            })?;
+
+            child_inode
+        } else {
+            // Cache miss: need to lookup from the underlying filesystem
+            let child_inode = dir_inode.lookup(name)?;
+
+            dir_inode.unlink(name)?;
+
+            child_inode
+        };
 
         let nlinks = child_inode.metadata().nlinks;
         fs::notify::on_link_count(&child_inode);
@@ -408,19 +418,23 @@ impl DirDentry<'_> {
         let cached_child = children.delete(name);
 
         let dir_inode = &self.inode;
-        let child_inode = match cached_child {
-            Some(child) => {
-                // Cache hit: use the cached dentry
-                child.inode().clone()
-            }
-            None => {
-                // Cache miss: need to lookup from the underlying filesystem
-                drop(children);
-                dir_inode.lookup(name)?
-            }
-        };
+        let child_inode = if let Some(child) = cached_child {
+            let child_inode = child.inode().clone();
 
-        dir_inode.rmdir(name)?;
+            dir_inode.rmdir(name).or_else(|err| {
+                children.insert(name.to_string(), child);
+                Err(err)
+            })?;
+
+            child_inode
+        } else {
+            // Cache miss: need to lookup from the underlying filesystem
+            let child_inode = dir_inode.lookup(name)?;
+
+            dir_inode.rmdir(name)?;
+
+            child_inode
+        };
 
         let nlinks = child_inode.metadata().nlinks;
         if nlinks == 0 {

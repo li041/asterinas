@@ -23,6 +23,7 @@ pub mod sysfs;
 pub mod thread_info;
 pub mod tmpfs;
 pub mod utils;
+pub mod virtiofs;
 
 use crate::{
     fs::{
@@ -48,6 +49,7 @@ pub fn init() {
     ext2::init();
     exfat::init();
     overlayfs::init();
+    virtiofs::init();
 
     path::init();
 }
