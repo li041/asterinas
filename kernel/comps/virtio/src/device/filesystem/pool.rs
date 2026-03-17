@@ -18,7 +18,7 @@ use ostd::{
 use crate::dma_buf::DmaBuf;
 
 const SIZE_CLASSES: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096];
-const POOL_INIT_SIZE: usize = 0;
+const POOL_INIT_SIZE: usize = 8;
 const POOL_HIGH_WATERMARK: usize = 64;
 
 #[derive(Debug)]
@@ -49,11 +49,7 @@ impl FsDmaPools {
     }
 
     pub fn alloc_to_device(self: &Arc<Self>, required_len: usize) -> FsDmaBuf {
-        let class = SIZE_CLASSES
-            .iter()
-            .copied()
-            .find(|size| *size >= required_len);
-        let alloc_len = class.unwrap_or(required_len.max(1));
+        let class = SIZE_CLASSES.iter().find(|&&size| size >= required_len);
 
         let storage = if let Some(class_size) = class {
             let pool = self
@@ -65,8 +61,10 @@ impl FsDmaPools {
                 .clone();
             FsDmaStorage::ToSegment(pool.alloc_segment().unwrap())
         } else {
+            // For buffers larger than the largest size class,
+            // we directly allocate a stream instead of trying to fit it into a pool segment.
             FsDmaStorage::Stream(Arc::new(
-                DmaStream::alloc(alloc_len.div_ceil(PAGE_SIZE), false).unwrap(),
+                DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false).unwrap(),
             ))
         };
 
@@ -77,11 +75,7 @@ impl FsDmaPools {
     }
 
     pub fn alloc_from_device(self: &Arc<Self>, required_len: usize) -> FsDmaBuf {
-        let class = SIZE_CLASSES
-            .iter()
-            .copied()
-            .find(|size| *size >= required_len);
-        let alloc_len = class.unwrap_or(required_len.max(1));
+        let class = SIZE_CLASSES.iter().find(|&&size| size >= required_len);
 
         let storage = if let Some(class_size) = class {
             let pool = self
@@ -93,8 +87,10 @@ impl FsDmaPools {
                 .clone();
             FsDmaStorage::FromSegment(pool.alloc_segment().unwrap())
         } else {
+            // For buffers larger than the largest size class,
+            // we directly allocate a stream instead of trying to fit it into a pool segment.
             FsDmaStorage::Stream(Arc::new(
-                DmaStream::alloc(alloc_len.div_ceil(PAGE_SIZE), false).unwrap(),
+                DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false).unwrap(),
             ))
         };
 
