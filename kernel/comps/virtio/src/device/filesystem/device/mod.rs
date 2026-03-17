@@ -119,8 +119,8 @@ impl core::fmt::Debug for FileSystemDevice {
     }
 }
 
+mod fuse_client;
 mod helpers;
-mod interface;
 mod virtio_ops;
 
 pub fn get_device_by_tag(tag: &str) -> Option<Arc<FileSystemDevice>> {

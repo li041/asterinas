@@ -16,11 +16,7 @@ impl FileSystemDevice {
     }
 
     pub(super) fn alloc_unique(&self) -> u64 {
-        self.unique_id_alloc.alloc() as u64 + 1
-    }
-
-    pub(super) fn unique_id(unique: u64) -> usize {
-        unique.saturating_sub(1) as usize
+        self.unique_id_alloc.alloc() as u64
     }
 
     pub(super) fn alloc_to_device_buf(&self, size: usize) -> FsDmaBuf {

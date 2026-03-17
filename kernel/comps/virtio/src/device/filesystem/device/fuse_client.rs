@@ -407,7 +407,7 @@ impl FileSystemDevice {
             }
         };
 
-        self.wait_for_unique(queue_index, unique)?;
+        self.wait_for_unique(queue_index, unique as usize)?;
 
         out_header_slice
             .mem_obj()
@@ -499,7 +499,7 @@ impl FileSystemDevice {
             }
         };
 
-        self.wait_for_unique(queue_index, unique)?;
+        self.wait_for_unique(queue_index, unique as usize)?;
 
         out_header_slice
             .mem_obj()
@@ -551,7 +551,7 @@ impl FileSystemDevice {
             }
         };
 
-        self.wait_for_unique(queue_index, unique)?;
+        self.wait_for_unique(queue_index, unique as usize)?;
 
         out_header_slice
             .mem_obj()
@@ -771,6 +771,6 @@ impl FileSystemDevice {
             }
         }
 
-        self.wait_for_unique_on(RequestQueueSelector::Hiprio, unique)
+        self.wait_for_unique_on(RequestQueueSelector::Hiprio, unique as usize)
     }
 }

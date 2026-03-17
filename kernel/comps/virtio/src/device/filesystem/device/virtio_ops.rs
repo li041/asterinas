@@ -155,7 +155,7 @@ impl FileSystemDevice {
             }
         }
 
-        self.wait_for_unique(queue_index, unique)
+        self.wait_for_unique(queue_index, unique as usize)
     }
 
     pub(super) fn submit_request_and_wait_early(
@@ -174,7 +174,7 @@ impl FileSystemDevice {
             }
         }
 
-        self.wait_for_unique_early(queue_index, unique)
+        self.wait_for_unique_early(queue_index, unique as usize)
     }
 
     pub(super) fn read_reply_header(
@@ -231,7 +231,7 @@ impl FileSystemDevice {
             .pending_requests
             .disable_irq()
             .lock()
-            .insert(token, Self::unique_id(unique));
+            .insert(token, unique as usize);
     }
 
     pub(super) fn handle_queue_irq(&self, selector: RequestQueueSelector) {
@@ -274,7 +274,7 @@ impl FileSystemDevice {
     pub(super) fn wait_for_unique(
         &self,
         queue_index: usize,
-        unique: u64,
+        unique: usize,
     ) -> Result<(), VirtioDeviceError> {
         self.wait_for_unique_on(RequestQueueSelector::Request(queue_index), unique)
     }
@@ -282,18 +282,17 @@ impl FileSystemDevice {
     pub(super) fn wait_for_unique_on(
         &self,
         selector: RequestQueueSelector,
-        unique: u64,
+        unique: usize,
     ) -> Result<(), VirtioDeviceError> {
         let queue_state = self.queue_state(selector);
-        let unique_id = Self::unique_id(unique);
 
         {
             let mut request_states = queue_state.request_states.disable_irq().lock();
-            if let Some(state) = request_states.get(&unique_id)
+            if let Some(state) = request_states.get(&unique)
                 && state.completed
             {
-                request_states.remove(&unique_id);
-                self.unique_id_alloc.dealloc(unique_id);
+                request_states.remove(&unique);
+                self.unique_id_alloc.dealloc(unique);
                 return Ok(());
             }
         }
@@ -301,13 +300,13 @@ impl FileSystemDevice {
         let (waiter, waker) = Waiter::new_pair();
         {
             let mut request_states = queue_state.request_states.disable_irq().lock();
-            let state = request_states.entry(unique_id).or_insert(RequestWaitState {
+            let state = request_states.entry(unique).or_insert(RequestWaitState {
                 completed: false,
                 waker: None,
             });
             if state.completed {
-                request_states.remove(&unique_id);
-                self.unique_id_alloc.dealloc(unique_id);
+                request_states.remove(&unique);
+                self.unique_id_alloc.dealloc(unique);
                 return Ok(());
             }
             state.waker = Some(waker);
@@ -320,10 +319,10 @@ impl FileSystemDevice {
         let wait_res = waiter.wait_until_or_cancelled(
             || {
                 let mut request_states = queue_state.request_states.disable_irq().lock();
-                if let Some(state) = request_states.get(&unique_id)
+                if let Some(state) = request_states.get(&unique)
                     && state.completed
                 {
-                    request_states.remove(&unique_id);
+                    request_states.remove(&unique);
                     return Some(());
                 }
                 None
@@ -338,16 +337,16 @@ impl FileSystemDevice {
         );
 
         if wait_res.is_ok() {
-            self.unique_id_alloc.dealloc(unique_id);
+            self.unique_id_alloc.dealloc(unique);
             return Ok(());
         }
 
         let mut request_states = queue_state.request_states.disable_irq().lock();
-        if let Some(state) = request_states.get_mut(&unique_id) {
+        if let Some(state) = request_states.get_mut(&unique) {
             state.waker = None;
         }
-        request_states.remove(&unique_id);
-        self.unique_id_alloc.dealloc(unique_id);
+        request_states.remove(&unique);
+        self.unique_id_alloc.dealloc(unique);
 
         Err(VirtioDeviceError::QueueUnknownError)
     }
@@ -357,21 +356,20 @@ impl FileSystemDevice {
     pub(super) fn wait_for_unique_early(
         &self,
         queue_index: usize,
-        unique: u64,
+        unique: usize,
     ) -> Result<(), VirtioDeviceError> {
         let selector = RequestQueueSelector::Request(queue_index);
         let queue_state = self.queue_state(selector);
-        let unique_id = Self::unique_id(unique);
 
         loop {
             self.handle_queue_irq(selector);
 
             let mut request_states = queue_state.request_states.disable_irq().lock();
-            if let Some(state) = request_states.get(&unique_id)
+            if let Some(state) = request_states.get(&unique)
                 && state.completed
             {
-                request_states.remove(&unique_id);
-                self.unique_id_alloc.dealloc(unique_id);
+                request_states.remove(&unique);
+                self.unique_id_alloc.dealloc(unique);
                 return Ok(());
             }
 
