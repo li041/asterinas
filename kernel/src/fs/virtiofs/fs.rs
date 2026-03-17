@@ -875,14 +875,14 @@ impl Inode for VirtioFsInode {
             InodeType::File => {
                 let (nodeid, open_out) = fs
                     .device
-                    .create_file_with_flags(parent_nodeid, name, S_IFREG | mode.bits() as u32)
+                    .fuse_create(parent_nodeid, name, S_IFREG | mode.bits() as u32)
                     .map_err(map_virtiofs_error)?;
                 (nodeid, Some(open_out))
             }
             InodeType::Dir => {
                 let nodeid = fs
                     .device
-                    .create_dir(parent_nodeid, name, S_IFDIR | mode.bits() as u32)
+                    .fuse_mkdir(parent_nodeid, name, S_IFDIR | mode.bits() as u32)
                     .map_err(map_virtiofs_error)?;
                 (nodeid, None)
             }

@@ -61,24 +61,18 @@ impl FileSystemDevice {
         );
 
         let in_header_slice = self.prepare_in_header_buf(in_header);
-        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
+        let in_payload_buf = self.alloc_to_device_buf(name.len() + 1);
         let out_header_slice = self.prepare_out_header_buf();
-        let out_payload_buf = self.alloc_from_device_buf(size_of::<EntryOut>());
+        let out_payload_slice = self.prepare_out_payload_buf(size_of::<EntryOut>());
 
-        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
-        self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
-
-        let out_payload_slice = Slice::new(out_payload_buf.clone(), 0..size_of::<EntryOut>());
+        let in_payload_slice = Slice::new(in_payload_buf.clone(), 0..(name.len() + 1));
+        self.write_cstr_to_buf(&in_payload_buf, name);
         let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
             queue_index,
             unique,
-            &[&in_header_slice, &in_name_slice],
+            &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
         )?;
 
@@ -92,7 +86,7 @@ impl FileSystemDevice {
         Ok(entry_out)
     }
 
-    pub fn create_dir(
+    pub fn fuse_mkdir(
         &self,
         parent_nodeid: u64,
         name: &str,
@@ -110,13 +104,8 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, mkdir_in, size_of::<EntryOut>());
         let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
-
         let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
         self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
         let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
@@ -147,18 +136,13 @@ impl FileSystemDevice {
         let in_header_slice = self.prepare_in_header_buf(in_header);
         let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
         let out_header_slice = self.prepare_out_header_buf();
-
-        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
+        let in_payload_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
         self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
         let queue_index = self.select_request_queue_for_node(parent_nodeid);
         self.submit_request_and_wait(
             queue_index,
             unique,
-            &[&in_header_slice, &in_name_slice],
+            &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice],
         )?;
         self.read_reply_header(&out_header_slice, unique, "FUSE_UNLINK", true)?;
@@ -177,25 +161,20 @@ impl FileSystemDevice {
         let in_header_slice = self.prepare_in_header_buf(in_header);
         let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
         let out_header_slice = self.prepare_out_header_buf();
-
-        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
+        let in_payload_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
         self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
         let queue_index = self.select_request_queue_for_node(parent_nodeid);
         self.submit_request_and_wait(
             queue_index,
             unique,
-            &[&in_header_slice, &in_name_slice],
+            &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice],
         )?;
         self.read_reply_header(&out_header_slice, unique, "FUSE_RMDIR", true)?;
         Ok(())
     }
 
-    pub fn create_file_with_flags(
+    pub fn fuse_create(
         &self,
         parent_nodeid: u64,
         name: &str,
@@ -214,13 +193,8 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, create_in, out_payload_size);
         let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
-
         let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
         self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
         let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
@@ -425,11 +399,7 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    pub fn fuse_open(
-        &self,
-        nodeid: u64,
-        flags: u32,
-    ) -> Result<FuseOpenOut, VirtioDeviceError> {
+    pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<FuseOpenOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
@@ -471,9 +441,8 @@ impl FileSystemDevice {
         let release_in = ReleaseIn::new(fh, flags);
 
         let in_header_slice = self.prepare_in_header_buf(in_header);
-        let out_header_slice = self.prepare_out_header_buf();
-
         let in_payload_slice = self.prepare_in_payload_buf(release_in);
+        let out_header_slice = self.prepare_out_header_buf();
         let queue_index = self.select_request_queue_for_node(nodeid);
 
         self.submit_request_and_wait(
@@ -548,7 +517,6 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, write_in, size_of::<WriteOut>());
         let in_data_buf = self.alloc_to_device_buf(data.len());
-
         let in_data_slice = Slice::new(in_data_buf.clone(), 0..data.len());
         {
             let mut writer = in_data_buf.writer().unwrap();
@@ -590,15 +558,8 @@ impl FileSystemDevice {
         );
         let forget_in = ForgetIn::new(nlookup);
 
-        let in_header_buf = self.alloc_to_device_buf(size_of::<InHeader>());
+        let in_header_slice = self.prepare_in_header_buf(in_header);
         let in_payload_slice = self.prepare_in_payload_buf(forget_in);
-
-        let in_header_slice = Slice::new(in_header_buf.clone(), 0..size_of::<InHeader>());
-        in_header_slice.write_val(0, &in_header).unwrap();
-        in_header_slice
-            .mem_obj()
-            .sync_to_device(in_header_slice.offset().clone())
-            .unwrap();
 
         {
             let mut queue = self.hiprio_queue.queue.lock();

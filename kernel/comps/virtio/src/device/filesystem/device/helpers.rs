@@ -49,6 +49,11 @@ impl FileSystemDevice {
         in_payload_slice
     }
 
+    pub(super) fn prepare_out_payload_buf(&self, size: usize) -> Slice<FsDmaBuf> {
+        let out_payload_buf = self.alloc_from_device_buf(size);
+        Slice::new(out_payload_buf.clone(), 0..size)
+    }
+
     pub(super) fn prepare_request_slices<T: Pod>(
         &self,
         in_header: InHeader,
