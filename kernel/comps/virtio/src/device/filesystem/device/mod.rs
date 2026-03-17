@@ -36,13 +36,9 @@ use crate::{
 
 const HIPRIO_QUEUE_INDEX: u16 = 0;
 const DEFAULT_QUEUE_SIZE: u16 = 128;
-const FUSE_READDIR_BUF_SIZE: u32 = 4096;
 const UNIQUE_ID_ALLOC_CAPACITY: usize = 4096;
 const REQUEST_WAIT_TIMEOUT_JIFFIES: u64 = 10 * TIMER_FREQ;
-const O_RDONLY: u32 = 0;
-const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
-const FUSE_ERR_ENOENT: i32 = -2;
 
 static FILESYSTEM_DEVICES: Once<SpinLock<Vec<Arc<FileSystemDevice>>>> = Once::new();
 

@@ -46,8 +46,11 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    // lxh Todo: 需要修改接口调用
-    pub fn lookup(&self, parent_nodeid: u64, name: &str) -> Result<EntryOut, VirtioDeviceError> {
+    pub fn fuse_lookup(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+    ) -> Result<EntryOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -79,38 +82,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
-            if out_header.error == FUSE_ERR_ENOENT {
-                debug!(
-                    "{} FUSE_LOOKUP miss: parent={}, name={}, unique={}, error={}, out_len={}",
-                    DEVICE_NAME,
-                    parent_nodeid,
-                    name,
-                    out_header.unique,
-                    out_header.error,
-                    out_header.len
-                );
-            } else {
-                warn!(
-                    "{} FUSE_LOOKUP failed: parent={}, name={}, unique={}, error={}, out_len={}",
-                    DEVICE_NAME,
-                    parent_nodeid,
-                    name,
-                    out_header.unique,
-                    out_header.error,
-                    out_header.len
-                );
-            }
-            if out_header.unique == unique && out_header.error != 0 {
-                return Err(VirtioDeviceError::FileSystemError(out_header.error));
-            }
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
+        self.read_reply_header(&out_header_slice, unique, "FUSE_LOOKUP", true)?;
 
         out_payload_slice
             .mem_obj()
@@ -118,58 +90,6 @@ impl FileSystemDevice {
             .unwrap();
         let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
         Ok(entry_out)
-    }
-
-    pub fn getattr_node(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
-        self.getattr(nodeid)
-    }
-
-    pub fn setattr_size(&self, nodeid: u64, size: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
-        self.setattr_size_inner(nodeid, size)
-    }
-
-    pub fn read_file_at(
-        &self,
-        nodeid: u64,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<u8>, VirtioDeviceError> {
-        let file_handle = self.open_file(nodeid, O_RDONLY)?;
-        let result = self.read_file_with_fh(nodeid, file_handle, offset, size);
-        let _ = self.release_file(nodeid, file_handle, O_RDONLY);
-        result
-    }
-
-    pub fn write_file_at(
-        &self,
-        nodeid: u64,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, VirtioDeviceError> {
-        let file_handle = self.open_file(nodeid, O_WRONLY)?;
-        let result = self.write_file_with_fh(nodeid, file_handle, offset, data);
-        let _ = self.release_file(nodeid, file_handle, O_WRONLY);
-        result
-    }
-
-    pub fn read_file_with_fh(
-        &self,
-        nodeid: u64,
-        fh: u64,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<u8>, VirtioDeviceError> {
-        self.read_file(nodeid, fh, offset, size)
-    }
-
-    pub fn write_file_with_fh(
-        &self,
-        nodeid: u64,
-        fh: u64,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<usize, VirtioDeviceError> {
-        self.write_file(nodeid, fh, offset, data)
     }
 
     pub fn create_dir(
@@ -215,22 +135,64 @@ impl FileSystemDevice {
         Ok(entry_out.nodeid)
     }
 
-    pub fn unlink_file(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
-        self.remove_entry(parent_nodeid, name, FUSE_OPCODE_UNLINK, "FUSE_UNLINK")
+    pub fn fuse_unlink(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
+        let unique = self.alloc_unique();
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + name.len() + 1) as u32,
+            FUSE_OPCODE_UNLINK,
+            unique,
+            parent_nodeid,
+        );
+
+        let in_header_slice = self.prepare_in_header_buf(in_header);
+        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
+        let out_header_slice = self.prepare_out_header_buf();
+
+        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
+        self.write_cstr_to_buf(&in_name_buf, name);
+        in_name_slice
+            .mem_obj()
+            .sync_to_device(in_name_slice.offset().clone())
+            .unwrap();
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
+        self.submit_request_and_wait(
+            queue_index,
+            unique,
+            &[&in_header_slice, &in_name_slice],
+            &[&out_header_slice],
+        )?;
+        self.read_reply_header(&out_header_slice, unique, "FUSE_UNLINK", true)?;
+        Ok(())
     }
 
-    pub fn remove_dir(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
-        self.remove_entry(parent_nodeid, name, FUSE_OPCODE_RMDIR, "FUSE_RMDIR")
-    }
+    pub fn fuse_rmdir(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
+        let unique = self.alloc_unique();
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + name.len() + 1) as u32,
+            FUSE_OPCODE_RMDIR,
+            unique,
+            parent_nodeid,
+        );
 
-    pub fn create_file(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-        mode: u32,
-    ) -> Result<(u64, u64), VirtioDeviceError> {
-        let (nodeid, open_out) = self.create_file_with_flags(parent_nodeid, name, mode)?;
-        Ok((nodeid, open_out.fh))
+        let in_header_slice = self.prepare_in_header_buf(in_header);
+        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
+        let out_header_slice = self.prepare_out_header_buf();
+
+        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
+        self.write_cstr_to_buf(&in_name_buf, name);
+        in_name_slice
+            .mem_obj()
+            .sync_to_device(in_name_slice.offset().clone())
+            .unwrap();
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
+        self.submit_request_and_wait(
+            queue_index,
+            unique,
+            &[&in_header_slice, &in_name_slice],
+            &[&out_header_slice],
+        )?;
+        self.read_reply_header(&out_header_slice, unique, "FUSE_RMDIR", true)?;
+        Ok(())
     }
 
     pub fn create_file_with_flags(
@@ -278,18 +240,7 @@ impl FileSystemDevice {
         Ok((entry_out.nodeid, open_out))
     }
 
-    pub fn readdir(
-        &self,
-        nodeid: u64,
-        offset: u64,
-    ) -> Result<Vec<VirtioFsDirEntry>, VirtioDeviceError> {
-        let dir_handle = self.open_dir(nodeid)?;
-        let entries = self.read_dir_entries(nodeid, dir_handle, offset, FUSE_READDIR_BUF_SIZE)?;
-        let _ = self.release_dir(nodeid, dir_handle);
-        Ok(entries)
-    }
-
-    fn getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
+    pub fn fuse_getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<FuseGetattrIn>()) as u32,
@@ -317,7 +268,7 @@ impl FileSystemDevice {
         Ok(out_payload_slice.read_val(0).unwrap())
     }
 
-    fn setattr_size_inner(&self, nodeid: u64, size: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
+    pub fn fuse_setattr(&self, nodeid: u64, size: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<SetattrIn>()) as u32,
@@ -345,7 +296,7 @@ impl FileSystemDevice {
         Ok(out_payload_slice.read_val(0).unwrap())
     }
 
-    fn open_dir(&self, nodeid: u64) -> Result<u64, VirtioDeviceError> {
+    pub fn fuse_opendir(&self, nodeid: u64) -> Result<u64, VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
@@ -374,7 +325,7 @@ impl FileSystemDevice {
         Ok(open_out.fh)
     }
 
-    fn read_dir_entries(
+    pub fn fuse_readdir(
         &self,
         nodeid: u64,
         fh: u64,
@@ -395,32 +346,15 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, read_in, out_payload_size);
         let queue_index = self.select_request_queue_for_node(nodeid);
 
-        {
-            let mut queue = self.request_queues[queue_index].queue.lock();
-            let token = queue.add_dma_buf(
-                &[&in_header_slice, &in_payload_slice],
-                &[&out_header_slice, &out_payload_slice],
-            )?;
-            self.register_pending_request(queue_index, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        };
+        self.submit_request_and_wait(
+            queue_index,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
 
-        self.wait_for_unique(queue_index, unique as usize)?;
-
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
-            warn!(
-                "{} FUSE_READDIR failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
-            );
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
+        let out_header =
+            self.read_reply_header(&out_header_slice, unique, "FUSE_READDIR", false)?;
 
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         let payload_len = cmp::min(payload_len, out_payload_size);
@@ -465,7 +399,7 @@ impl FileSystemDevice {
         Ok(entries)
     }
 
-    fn release_dir(&self, nodeid: u64, fh: u64) -> Result<(), VirtioDeviceError> {
+    pub fn fuse_releasedir(&self, nodeid: u64, fh: u64) -> Result<(), VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
@@ -475,53 +409,23 @@ impl FileSystemDevice {
         );
         let release_in = ReleaseIn::new(fh, 0);
 
-        let in_header_buf = self.alloc_to_device_buf(size_of::<InHeader>());
+        let in_header_slice = self.prepare_in_header_buf(in_header);
         let in_payload_slice = self.prepare_in_payload_buf(release_in);
-        let out_header_buf = self.alloc_from_device_buf(size_of::<OutHeader>());
-
-        let in_header_slice = Slice::new(in_header_buf.clone(), 0..size_of::<InHeader>());
-        in_header_slice.write_val(0, &in_header).unwrap();
-        in_header_slice
-            .mem_obj()
-            .sync_to_device(in_header_slice.offset().clone())
-            .unwrap();
+        let out_header_slice = self.prepare_out_header_buf();
         let queue_index = self.select_request_queue_for_node(nodeid);
 
-        let out_header_slice = Slice::new(out_header_buf.clone(), 0..size_of::<OutHeader>());
+        self.submit_request_and_wait(
+            queue_index,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[&out_header_slice],
+        )?;
 
-        {
-            let mut queue = self.request_queues[queue_index].queue.lock();
-            let token =
-                queue.add_dma_buf(&[&in_header_slice, &in_payload_slice], &[&out_header_slice])?;
-            self.register_pending_request(queue_index, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        };
-
-        self.wait_for_unique(queue_index, unique as usize)?;
-
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
-            warn!(
-                "{} FUSE_RELEASEDIR failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
-            );
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
+        self.read_reply_header(&out_header_slice, unique, "FUSE_RELEASEDIR", false)?;
         Ok(())
     }
 
-    pub fn open_file(&self, nodeid: u64, flags: u32) -> Result<u64, VirtioDeviceError> {
-        let open_out = self.open_file_with_flags(nodeid, flags)?;
-        Ok(open_out.fh)
-    }
-
-    pub fn open_file_with_flags(
+    pub fn fuse_open(
         &self,
         nodeid: u64,
         flags: u32,
@@ -539,32 +443,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
         let queue_index = self.select_request_queue_for_node(nodeid);
 
-        {
-            let mut queue = self.request_queues[queue_index].queue.lock();
-            let token = queue.add_dma_buf(
-                &[&in_header_slice, &in_payload_slice],
-                &[&out_header_slice, &out_payload_slice],
-            )?;
-            self.register_pending_request(queue_index, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        };
+        self.submit_request_and_wait(
+            queue_index,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
 
-        self.wait_for_unique(queue_index, unique as usize)?;
-
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
-            warn!(
-                "{} FUSE_OPEN failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
-            );
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
+        self.read_reply_header(&out_header_slice, unique, "FUSE_OPEN", false)?;
 
         out_payload_slice
             .mem_obj()
@@ -574,51 +460,7 @@ impl FileSystemDevice {
         Ok(open_out)
     }
 
-    fn remove_entry(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-        opcode: u32,
-        op_name: &str,
-    ) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + name.len() + 1) as u32,
-            opcode,
-            unique,
-            parent_nodeid,
-        );
-
-        let in_header_slice = self.prepare_in_header_buf(in_header);
-        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
-        let out_header_slice = self.prepare_out_header_buf();
-
-        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
-        self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
-        let queue_index = self.select_request_queue_for_node(parent_nodeid);
-        self.submit_request_and_wait(
-            queue_index,
-            unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice],
-        )?;
-        self.read_reply_header(&out_header_slice, unique, op_name, true)
-            .map_err(|err| {
-                warn!(
-                    "{} {} failed: parent={}, name={}, unique={} (request)",
-                    DEVICE_NAME, op_name, parent_nodeid, name, unique
-                );
-                err
-            })?;
-
-        Ok(())
-    }
-
-    pub fn release_file(&self, nodeid: u64, fh: u64, flags: u32) -> Result<(), VirtioDeviceError> {
+    pub fn fuse_release(&self, nodeid: u64, fh: u64, flags: u32) -> Result<(), VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
@@ -645,7 +487,7 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    fn read_file(
+    pub fn fuse_read(
         &self,
         nodeid: u64,
         fh: u64,
@@ -687,7 +529,7 @@ impl FileSystemDevice {
         Ok(content)
     }
 
-    fn write_file(
+    pub fn fuse_write(
         &self,
         nodeid: u64,
         fh: u64,
@@ -735,14 +577,10 @@ impl FileSystemDevice {
         Ok(write_out.size as usize)
     }
 
-    pub fn forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
+    pub fn fuse_forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
         if nodeid == FUSE_ROOT_ID || nlookup == 0 {
             return Ok(());
         }
-        self.send_fuse_forget(nodeid, nlookup)
-    }
-
-    fn send_fuse_forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
         let unique = self.alloc_unique();
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ForgetIn>()) as u32,

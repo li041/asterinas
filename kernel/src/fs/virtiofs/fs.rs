@@ -99,7 +99,7 @@ impl VirtioFs {
     fn new(device: Arc<FileSystemDevice>, source: String) -> Arc<Self> {
         Arc::new_cyclic(|weak_fs| {
             let root_attr = device
-                .getattr_node(FUSE_ROOT_ID)
+                .fuse_getattr(FUSE_ROOT_ID)
                 .ok()
                 .map(|attr_out| attr_out.attr)
                 .unwrap_or(Attr {
@@ -297,7 +297,7 @@ impl VirtioFsInode {
             return;
         };
 
-        let _ = fs.device.forget(nodeid, nlookup);
+        let _ = fs.device.fuse_forget(nodeid, nlookup);
     }
 
     fn revalidate_lookup(&self) -> Result<()> {
@@ -322,7 +322,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let entry_out = fs
             .device
-            .lookup(parent_nodeid, &name)
+            .fuse_lookup(parent_nodeid, &name)
             .map_err(map_virtiofs_error)?;
         self.increase_lookup_count(1);
 
@@ -375,7 +375,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let attr_out = fs
             .device
-            .getattr_node(self.nodeid())
+            .fuse_getattr(self.nodeid())
             .map_err(map_virtiofs_error)?;
 
         let new_metadata = metadata_from_attr(attr_out.attr);
@@ -455,7 +455,15 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let data = fs
             .device
-            .read_file_at(self.nodeid(), start as u64, max_len)
+            .fuse_open(self.nodeid(), O_RDONLY)
+            .and_then(|fh_out| {
+                let fh = fh_out.fh;
+                let result = fs
+                    .device
+                    .fuse_read(self.nodeid(), fh, start as u64, max_len as u32);
+                let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDONLY);
+                result
+            })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs read failed"))?;
         let mut reader = VmReader::from(data.as_slice());
         writer.write_fallible(&mut reader)?;
@@ -494,7 +502,15 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let written = fs
             .device
-            .write_file_at(self.nodeid(), offset as u64, &data)
+            .fuse_open(self.nodeid(), O_WRONLY)
+            .and_then(|fh_out| {
+                let fh = fh_out.fh;
+                let result = fs
+                    .device
+                    .fuse_write(self.nodeid(), fh, offset as u64, &data);
+                let _ = fs.device.fuse_release(self.nodeid(), fh, O_WRONLY);
+                result
+            })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs write failed"))?;
 
         let new_size = offset + written;
@@ -528,7 +544,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let open_out = fs
             .device
-            .open_file_with_flags(self.nodeid(), open_flags)
+            .fuse_open(self.nodeid(), open_flags)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs open failed"))?;
         let cache_enabled =
             self.page_cache.is_some() && (open_out.open_flags & FOPEN_DIRECT_IO == 0);
@@ -540,7 +556,7 @@ impl VirtioFsInode {
         let Some(inode) = self.this.upgrade() else {
             let _ = fs
                 .device
-                .release_file(self.nodeid(), open_out.fh, open_flags);
+                .fuse_release(self.nodeid(), open_out.fh, open_flags);
             return_errno_with_message!(Errno::EIO, "virtiofs inode is unavailable");
         };
 
@@ -571,7 +587,13 @@ impl PageCacheBackend for VirtioFsInode {
         let fs = self.fs_ref();
         let data = fs
             .device
-            .read_file_at(self.nodeid(), offset as u64, size)
+            .fuse_open(self.nodeid(), O_RDONLY)
+            .and_then(|fh_out| {
+                let fh = fh_out.fh;
+                let result = fs.device.fuse_read(self.nodeid(), fh, offset as u64, size);
+                let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDONLY);
+                result
+            })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page read failed"))?;
         let mut frame_writer = frame.writer();
         frame_writer.write_fallible(&mut VmReader::from(data.as_slice()).to_fallible())?;
@@ -592,7 +614,13 @@ impl PageCacheBackend for VirtioFsInode {
 
         let fs = self.fs_ref();
         fs.device
-            .write_file_at(self.nodeid(), offset as u64, &data)
+            .fuse_open(self.nodeid(), O_WRONLY)
+            .and_then(|fh_out| {
+                let fh = fh_out.fh;
+                let result = fs.device.fuse_write(self.nodeid(), fh, offset as u64, &data);
+                let _ = fs.device.fuse_release(self.nodeid(), fh, O_WRONLY);
+                result
+            })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page write failed"))?;
         Ok(BioWaiter::new())
     }
@@ -610,7 +638,7 @@ impl Drop for VirtioFsHandle {
         if let Some(fs) = self.inode.fs.upgrade() {
             let _ = fs
                 .device
-                .release_file(self.inode.nodeid(), self.fh, self.release_flags);
+                .fuse_release(self.inode.nodeid(), self.fh, self.release_flags);
         }
     }
 }
@@ -706,7 +734,7 @@ impl Inode for VirtioFsInode {
         let fs = self.fs_ref();
         let attr_out = fs
             .device
-            .setattr_size(self.nodeid(), size)
+            .fuse_setattr(self.nodeid(), size)
             .map_err(map_virtiofs_error)?;
 
         let new_metadata = metadata_from_attr(attr_out.attr);
@@ -813,7 +841,7 @@ impl Inode for VirtioFsInode {
         let parent_nodeid = self.nodeid();
         let entry_out = fs
             .device
-            .lookup(parent_nodeid, name)
+            .fuse_lookup(parent_nodeid, name)
             .map_err(map_virtiofs_error)?;
         let nodeid = entry_out.nodeid;
         let now = MonotonicCoarseClock::get().read_time();
@@ -867,11 +895,11 @@ impl Inode for VirtioFsInode {
         };
         let attr_out: FuseAttrOut = fs
             .device
-            .getattr_node(nodeid)
+            .fuse_getattr(nodeid)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs getattr after create failed"))?;
 
         if let Some(open_out) = opened_open_out {
-            let _ = fs.device.release_file(nodeid, open_out.fh, O_RDWR);
+            let _ = fs.device.fuse_release(nodeid, open_out.fh, O_RDWR);
         }
 
         let now = MonotonicCoarseClock::get().read_time();
@@ -900,7 +928,7 @@ impl Inode for VirtioFsInode {
 
         let fs = self.fs_ref();
         fs.device
-            .unlink_file(self.nodeid(), name)
+            .fuse_unlink(self.nodeid(), name)
             .map_err(map_virtiofs_error)
     }
 
@@ -912,11 +940,13 @@ impl Inode for VirtioFsInode {
 
         let fs = self.fs_ref();
         fs.device
-            .remove_dir(self.nodeid(), name)
+            .fuse_rmdir(self.nodeid(), name)
             .map_err(map_virtiofs_error)
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
+        // lxh debug
+        const FUSE_READDIR_BUF_SIZE: u32 = 4096;
         let metadata = self.metadata();
         if metadata.type_ != InodeType::Dir {
             return_errno_with_message!(Errno::ENOTDIR, "readdir on non-directory")
@@ -925,7 +955,14 @@ impl Inode for VirtioFsInode {
         let fs = self.fs_ref();
         let entries: Vec<VirtioFsDirEntry> = fs
             .device
-            .readdir(self.nodeid(), offset as u64)
+            .fuse_opendir(self.nodeid())
+            .and_then(|fh| {
+                let result =
+                    fs.device
+                        .fuse_readdir(self.nodeid(), fh, offset as u64, FUSE_READDIR_BUF_SIZE);
+                let _ = fs.device.fuse_releasedir(self.nodeid(), fh);
+                result
+            })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs readdir failed"))?;
 
         let mut current_off = offset;
