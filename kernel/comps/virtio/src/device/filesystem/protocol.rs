@@ -2,6 +2,8 @@
 
 use int_to_c_enum::TryFromInt;
 
+// Reference: <https://gitlab.com/virtio-fs/virtiofsd/-/blob/main/src/fuse.rs>
+
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
 pub struct InHeader {
@@ -442,7 +444,7 @@ pub const FUSE_OPCODE_READDIR: u32 = FuseOpcode::Readdir as u32;
 pub const FUSE_OPCODE_RELEASEDIR: u32 = FuseOpcode::Releasedir as u32;
 
 pub const FUSE_KERNEL_VERSION: u32 = 7;
-pub const FUSE_KERNEL_MINOR_VERSION: u32 = 31;
+pub const FUSE_KERNEL_MINOR_VERSION: u32 = 38;
 
 pub mod init_flags {
     pub const ASYNC_READ: u32 = 1 << 0;

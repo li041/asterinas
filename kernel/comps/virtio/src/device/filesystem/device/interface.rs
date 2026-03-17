@@ -3,116 +3,47 @@
 use super::*;
 
 impl FileSystemDevice {
-    pub fn negotiate_features(features: u64) -> u64 {
-        let device_features = FileSystemFeatures::from_bits_truncate(features);
-        let supported_features = FileSystemFeatures::supported_features();
-        let fs_features = device_features & supported_features;
-        debug!("features negotiated: {:?}", fs_features);
-        fs_features.bits()
-    }
+    pub(crate) fn send_fuse_init(&self) -> Result<(), VirtioDeviceError> {
+        let unique = self.alloc_unique();
 
-    pub fn init(mut transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
-        let config_manager = VirtioFsConfig::new_manager(transport.as_ref());
-        let config = config_manager.read_config();
-
-        let notify_supported =
-            transport.read_device_features() & FileSystemFeatures::NOTIFICATION.bits() != 0;
-        let special_queues_count = if notify_supported { 2 } else { 1 };
-
-        let total_queues = transport.num_queues();
-        let max_request_queues_from_transport =
-            total_queues.saturating_sub(special_queues_count) as usize;
-        let request_queue_count = cmp::min(
-            config.num_request_queues as usize,
-            max_request_queues_from_transport,
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + size_of::<InitIn>()) as u32,
+            FUSE_OPCODE_INIT,
+            unique,
+            0,
         );
+        let init_in = InitIn::new(FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION, 0, 0, 0);
 
-        if request_queue_count == 0 {
-            return Err(VirtioDeviceError::QueuesAmountDoNotMatch(
-                total_queues,
-                special_queues_count + config.num_request_queues as u16,
-            ));
-        }
+        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+            self.prepare_request_slices(in_header, init_in, size_of::<InitOut>());
 
-        let hiprio_queue =
-            FsRequestQueue::new(Self::new_queue(HIPRIO_QUEUE_INDEX, transport.as_mut())?);
+        self.submit_request_and_wait_early(
+            0,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
 
-        let dma_pools = FsDmaPools::new();
+        self.read_reply_header(&out_header_slice, unique, "FUSE_INIT", false)?;
 
-        let mut request_queues = Vec::with_capacity(request_queue_count);
-        for idx in 0..request_queue_count {
-            let queue_index = special_queues_count + idx as u16;
-            request_queues.push(FsRequestQueue::new(Self::new_queue(
-                queue_index,
-                transport.as_mut(),
-            )?));
-        }
-
-        let tag = Self::parse_tag(&config.tag);
-        let device = Arc::new(Self {
-            transport: SpinLock::new(transport),
-            hiprio_queue,
-            request_queues,
-            dma_pools,
-            unique_id_alloc: SyncIdAlloc::with_capacity(UNIQUE_ID_ALLOC_CAPACITY),
-            tag,
-            notify_supported,
-        });
-
-        let mut transport = device.transport.lock();
-        transport
-            .register_cfg_callback(Box::new(config_space_change))
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
             .unwrap();
-        let device_for_hiprio_callback = device.clone();
-        let hiprio_wakeup_callback = move |_: &TrapFrame| {
-            device_for_hiprio_callback.handle_queue_irq(RequestQueueSelector::Hiprio);
-        };
-        transport
-            .register_queue_callback(HIPRIO_QUEUE_INDEX, Box::new(hiprio_wakeup_callback), false)
-            .unwrap();
-        for idx in 0..request_queue_count {
-            let queue_idx = special_queues_count + idx as u16;
-            let device_for_callback = device.clone();
-            let wakeup_callback = move |_: &TrapFrame| {
-                device_for_callback.handle_queue_irq(RequestQueueSelector::Request(
-                    (queue_idx - special_queues_count) as usize,
-                ));
-            };
-            transport
-                .register_queue_callback(queue_idx, Box::new(wakeup_callback), false)
-                .unwrap();
-        }
-        transport.finish_init();
-        drop(transport);
-
-        device.send_fuse_init()?;
-
-        FILESYSTEM_DEVICES
-            .call_once(|| SpinLock::new(Vec::new()))
-            .disable_irq()
-            .lock()
-            .push(device.clone());
+        let init_out: InitOut = out_payload_slice.read_val(0).unwrap();
 
         info!(
-            "{} initialized, tag = {}, request_queues = {}, notify = {}",
+            "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",
             DEVICE_NAME,
-            device.tag,
-            device.request_queues.len(),
-            device.notify_supported
+            FUSE_KERNEL_VERSION,
+            FUSE_KERNEL_MINOR_VERSION,
+            init_out.major,
+            init_out.minor,
+            init_out.max_write,
+            init_out.flags,
         );
-        info!(
-            "{} test file read is deferred; call debug_read_test_file_for_all_devices() later",
-            DEVICE_NAME
-        );
-
-        let _ = &device.hiprio_queue;
-        let _ = &device.request_queues;
 
         Ok(())
-    }
-
-    pub fn tag(&self) -> &str {
-        &self.tag
     }
 
     pub fn lookup(&self, parent_nodeid: u64, name: &str) -> Result<u64, VirtioDeviceError> {
@@ -125,6 +56,81 @@ impl FileSystemDevice {
         name: &str,
     ) -> Result<EntryOut, VirtioDeviceError> {
         self.lookup_entry_inner(parent_nodeid, name)
+    }
+
+    fn lookup_entry_inner(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        let unique = self.alloc_unique();
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + name.len() + 1) as u32,
+            FUSE_OPCODE_LOOKUP,
+            unique,
+            parent_nodeid,
+        );
+
+        let in_header_slice = self.prepare_in_header_buf(in_header);
+        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
+        let out_header_slice = self.prepare_out_header_buf();
+        let out_payload_buf = self.alloc_from_device_buf(size_of::<EntryOut>());
+
+        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
+        self.write_cstr_to_buf(&in_name_buf, name);
+        in_name_slice
+            .mem_obj()
+            .sync_to_device(in_name_slice.offset().clone())
+            .unwrap();
+
+        let out_payload_slice = Slice::new(out_payload_buf.clone(), 0..size_of::<EntryOut>());
+
+        self.submit_request_and_wait(
+            0,
+            unique,
+            &[&in_header_slice, &in_name_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
+
+        out_header_slice
+            .mem_obj()
+            .sync_from_device(out_header_slice.offset().clone())
+            .unwrap();
+        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
+        if out_header.unique != unique || out_header.error != 0 {
+            if out_header.error == FUSE_ERR_ENOENT {
+                debug!(
+                    "{} FUSE_LOOKUP miss: parent={}, name={}, unique={}, error={}, out_len={}",
+                    DEVICE_NAME,
+                    parent_nodeid,
+                    name,
+                    out_header.unique,
+                    out_header.error,
+                    out_header.len
+                );
+            } else {
+                warn!(
+                    "{} FUSE_LOOKUP failed: parent={}, name={}, unique={}, error={}, out_len={}",
+                    DEVICE_NAME,
+                    parent_nodeid,
+                    name,
+                    out_header.unique,
+                    out_header.error,
+                    out_header.len
+                );
+            }
+            if out_header.unique == unique && out_header.error != 0 {
+                return Err(VirtioDeviceError::FileSystemError(out_header.error));
+            }
+            return Err(VirtioDeviceError::QueueUnknownError);
+        }
+
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
+            .unwrap();
+        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
+        Ok(entry_out)
     }
 
     pub fn forget_lookup(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
@@ -299,120 +305,6 @@ impl FileSystemDevice {
         let entries = self.read_dir_entries(nodeid, dir_handle, offset, FUSE_READDIR_BUF_SIZE)?;
         let _ = self.release_dir(nodeid, dir_handle);
         Ok(entries)
-    }
-
-    fn send_fuse_init(&self) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<InitIn>()) as u32,
-            FUSE_OPCODE_INIT,
-            unique,
-            0,
-        );
-        let init_in = InitIn::new(FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION, 0, 0, 0);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, init_in, size_of::<InitOut>());
-        self.submit_request_and_wait_early(
-            0,
-            unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
-        )?;
-        self.read_reply_header(&out_header_slice, unique, "FUSE_INIT", false)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let init_out: InitOut = out_payload_slice.read_val(0).unwrap();
-
-        info!(
-            "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",
-            DEVICE_NAME,
-            FUSE_KERNEL_VERSION,
-            FUSE_KERNEL_MINOR_VERSION,
-            init_out.major,
-            init_out.minor,
-            init_out.max_write,
-            init_out.flags,
-        );
-        Ok(())
-    }
-
-    fn lookup_entry_inner(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-    ) -> Result<EntryOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + name.len() + 1) as u32,
-            FUSE_OPCODE_LOOKUP,
-            unique,
-            parent_nodeid,
-        );
-
-        let in_header_slice = self.prepare_in_header_buf(in_header);
-        let in_name_buf = self.alloc_to_device_buf(name.len() + 1);
-        let out_header_slice = self.prepare_out_header_buf();
-        let out_payload_buf = self.alloc_from_device_buf(size_of::<EntryOut>());
-
-        let in_name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
-        self.write_cstr_to_buf(&in_name_buf, name);
-        in_name_slice
-            .mem_obj()
-            .sync_to_device(in_name_slice.offset().clone())
-            .unwrap();
-
-        let out_payload_slice = Slice::new(out_payload_buf.clone(), 0..size_of::<EntryOut>());
-
-        self.submit_request_and_wait(
-            0,
-            unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
-        )?;
-
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
-            if out_header.error == FUSE_ERR_ENOENT {
-                debug!(
-                    "{} FUSE_LOOKUP miss: parent={}, name={}, unique={}, error={}, out_len={}",
-                    DEVICE_NAME,
-                    parent_nodeid,
-                    name,
-                    out_header.unique,
-                    out_header.error,
-                    out_header.len
-                );
-            } else {
-                warn!(
-                    "{} FUSE_LOOKUP failed: parent={}, name={}, unique={}, error={}, out_len={}",
-                    DEVICE_NAME,
-                    parent_nodeid,
-                    name,
-                    out_header.unique,
-                    out_header.error,
-                    out_header.len
-                );
-            }
-            if out_header.unique == unique && out_header.error != 0 {
-                return Err(VirtioDeviceError::FileSystemError(out_header.error));
-            }
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
-        Ok(entry_out)
     }
 
     fn getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {

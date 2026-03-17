@@ -126,7 +126,7 @@ mod virtio_ops;
 pub fn get_device_by_tag(tag: &str) -> Option<Arc<FileSystemDevice>> {
     let devices = FILESYSTEM_DEVICES.get()?;
     let devices = devices.disable_irq().lock();
-    devices.iter().find(|device| device.tag() == tag).cloned()
+    devices.iter().find(|device| device.tag == tag).cloned()
 }
 
 fn config_space_change(_: &TrapFrame) {

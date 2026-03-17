@@ -3,6 +3,114 @@
 use super::*;
 
 impl FileSystemDevice {
+    pub fn negotiate_features(features: u64) -> u64 {
+        let device_features = FileSystemFeatures::from_bits_truncate(features);
+        let supported_features = FileSystemFeatures::supported_features();
+        let fs_features = device_features & supported_features;
+        debug!("features negotiated: {:?}", fs_features);
+        fs_features.bits()
+    }
+
+    pub fn init(mut transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
+        let config_manager = VirtioFsConfig::new_manager(transport.as_ref());
+        let config = config_manager.read_config();
+
+        let notify_supported =
+            transport.read_device_features() & FileSystemFeatures::NOTIFICATION.bits() != 0;
+        let special_queues_count = if notify_supported { 2 } else { 1 };
+
+        let total_queues = transport.num_queues();
+        let max_request_queues_from_transport =
+            total_queues.saturating_sub(special_queues_count) as usize;
+        let request_queue_count = cmp::min(
+            config.num_request_queues as usize,
+            max_request_queues_from_transport,
+        );
+
+        if request_queue_count == 0 {
+            return Err(VirtioDeviceError::QueuesAmountDoNotMatch(
+                total_queues,
+                special_queues_count + config.num_request_queues as u16,
+            ));
+        }
+
+        let hiprio_queue =
+            FsRequestQueue::new(Self::new_queue(HIPRIO_QUEUE_INDEX, transport.as_mut())?);
+
+        let dma_pools = FsDmaPools::new();
+
+        let mut request_queues = Vec::with_capacity(request_queue_count);
+        for idx in 0..request_queue_count {
+            let queue_index = special_queues_count + idx as u16;
+            request_queues.push(FsRequestQueue::new(Self::new_queue(
+                queue_index,
+                transport.as_mut(),
+            )?));
+        }
+
+        let tag = Self::parse_tag(&config.tag);
+        let device = Arc::new(Self {
+            transport: SpinLock::new(transport),
+            hiprio_queue,
+            request_queues,
+            dma_pools,
+            unique_id_alloc: SyncIdAlloc::with_capacity(UNIQUE_ID_ALLOC_CAPACITY),
+            tag,
+            notify_supported,
+        });
+
+        let mut transport = device.transport.lock();
+        transport
+            .register_cfg_callback(Box::new(config_space_change))
+            .unwrap();
+        let device_for_hiprio_callback = device.clone();
+        let hiprio_wakeup_callback = move |_: &TrapFrame| {
+            device_for_hiprio_callback.handle_queue_irq(RequestQueueSelector::Hiprio);
+        };
+        transport
+            .register_queue_callback(HIPRIO_QUEUE_INDEX, Box::new(hiprio_wakeup_callback), false)
+            .unwrap();
+        for idx in 0..request_queue_count {
+            let queue_idx = special_queues_count + idx as u16;
+            let device_for_callback = device.clone();
+            let wakeup_callback = move |_: &TrapFrame| {
+                device_for_callback.handle_queue_irq(RequestQueueSelector::Request(
+                    (queue_idx - special_queues_count) as usize,
+                ));
+            };
+            transport
+                .register_queue_callback(queue_idx, Box::new(wakeup_callback), false)
+                .unwrap();
+        }
+        transport.finish_init();
+        drop(transport);
+
+        device.send_fuse_init()?;
+
+        FILESYSTEM_DEVICES
+            .call_once(|| SpinLock::new(Vec::new()))
+            .disable_irq()
+            .lock()
+            .push(device.clone());
+
+        info!(
+            "{} initialized, tag = {}, request_queues = {}, notify = {}",
+            DEVICE_NAME,
+            device.tag,
+            device.request_queues.len(),
+            device.notify_supported
+        );
+        info!(
+            "{} test file read is deferred; call debug_read_test_file_for_all_devices() later",
+            DEVICE_NAME
+        );
+
+        let _ = &device.hiprio_queue;
+        let _ = &device.request_queues;
+
+        Ok(())
+    }
+
     pub(super) fn new_queue(
         index: u16,
         transport: &mut dyn VirtioTransport,
