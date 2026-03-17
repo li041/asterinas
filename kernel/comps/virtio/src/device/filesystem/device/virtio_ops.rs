@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::*;
-use crate::queue;
 
 impl FileSystemDevice {
     pub fn negotiate_features(features: u64) -> u64 {
@@ -131,72 +130,51 @@ impl FileSystemDevice {
         }
     }
 
-    fn select_request_queue(&self, nodeid: u64) -> usize {
+    pub(super) fn select_request_queue(&self, nodeid: u64) -> QueueSelector {
         let request_queue_count = self.request_queues.len();
         if request_queue_count <= 1 {
-            return 0;
+            return QueueSelector::Request(0);
         }
 
-        (nodeid as usize) % request_queue_count
+        QueueSelector::Request((nodeid as usize) % request_queue_count)
     }
 
     pub(super) fn submit_request(
         &self,
-        nodeid: u64,
+        selector: QueueSelector,
         unique: u64,
         in_slices: &[&Slice<FsDmaBuf>],
         out_slices: &[&Slice<FsDmaBuf>],
     ) -> Result<(), VirtioDeviceError> {
-        let queue_index = self.select_request_queue(nodeid);
+        let queue = self.queue(selector);
 
-        let mut queue = self.request_queues[queue_index].queue.lock();
-        let token = queue.add_dma_buf(in_slices, out_slices)?;
-        self.register_pending_request(queue_index, token, unique);
-        if queue.should_notify() {
-            queue.notify();
+        {
+            let mut virt_queue = queue.queue.lock();
+
+            let token = virt_queue.add_dma_buf(in_slices, out_slices)?;
+
+            queue
+                .pending_requests
+                .disable_irq()
+                .lock()
+                .insert(token, unique as usize);
+
+            if virt_queue.should_notify() {
+                virt_queue.notify();
+            }
         }
-
         Ok(())
     }
 
     pub(super) fn submit_request_and_wait(
         &self,
-        nodeid: u64,
+        selector: QueueSelector,
         unique: u64,
         in_slices: &[&Slice<FsDmaBuf>],
         out_slices: &[&Slice<FsDmaBuf>],
     ) -> Result<(), VirtioDeviceError> {
-        let queue_index = self.select_request_queue(nodeid);
-
-        {
-            let mut queue = self.request_queues[queue_index].queue.lock();
-            let token = queue.add_dma_buf(in_slices, out_slices)?;
-            self.register_pending_request(queue_index, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        }
-
-        self.wait_for_unique(queue_index, unique as usize)
-    }
-
-    pub(super) fn submit_request_and_wait_early(
-        &self,
-        queue_index: usize,
-        unique: u64,
-        in_slices: &[&Slice<FsDmaBuf>],
-        out_slices: &[&Slice<FsDmaBuf>],
-    ) -> Result<(), VirtioDeviceError> {
-        {
-            let mut queue = self.request_queues[queue_index].queue.lock();
-            let token = queue.add_dma_buf(in_slices, out_slices)?;
-            self.register_pending_request(queue_index, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        }
-
-        self.wait_for_unique_early(queue_index, unique as usize)
+        self.submit_request(selector, unique, in_slices, out_slices)?;
+        self.wait_for_unique(selector, unique as usize)
     }
 
     pub(super) fn check_reply(
@@ -222,24 +200,6 @@ impl FileSystemDevice {
         }
 
         Ok(out_header)
-    }
-
-    pub(super) fn register_pending_request(&self, queue_index: usize, token: u16, unique: u64) {
-        self.register_pending_request_on_queue(QueueSelector::Request(queue_index), token, unique);
-    }
-
-    pub(super) fn register_pending_request_on_queue(
-        &self,
-        selector: QueueSelector,
-        token: u16,
-        unique: u64,
-    ) {
-        let queue_state = self.queue(selector);
-        queue_state
-            .pending_requests
-            .disable_irq()
-            .lock()
-            .insert(token, unique as usize);
     }
 
     pub(super) fn handle_queue_irq(&self, selector: QueueSelector) {
@@ -279,11 +239,7 @@ impl FileSystemDevice {
         }
     }
 
-    fn wait_for_unique(&self, queue_index: usize, unique: usize) -> Result<(), VirtioDeviceError> {
-        self.wait_for_unique_on(QueueSelector::Request(queue_index), unique)
-    }
-
-    pub(super) fn wait_for_unique_on(
+    pub(super) fn wait_for_unique(
         &self,
         selector: QueueSelector,
         unique: usize,
@@ -359,10 +315,9 @@ impl FileSystemDevice {
     /// intended for early boot or non-task contexts.
     pub(super) fn wait_for_unique_early(
         &self,
-        queue_index: usize,
+        selector: QueueSelector,
         unique: usize,
     ) -> Result<(), VirtioDeviceError> {
-        let selector = QueueSelector::Request(queue_index);
         let queue_state = self.queue(selector);
 
         loop {
