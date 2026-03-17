@@ -90,13 +90,13 @@ impl FsType for VirtioFsType {
 pub struct VirtioFs {
     sb: SuperBlock,
     root: Arc<VirtioFsInode>,
-    source: String,
+    tag: String,
     device: Arc<FileSystemDevice>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
 }
 
 impl VirtioFs {
-    fn new(device: Arc<FileSystemDevice>, source: String) -> Arc<Self> {
+    fn new(device: Arc<FileSystemDevice>, tag: String) -> Arc<Self> {
         Arc::new_cyclic(|weak_fs| {
             let root_attr = device
                 .fuse_getattr(FUSE_ROOT_ID)
@@ -127,7 +127,7 @@ impl VirtioFs {
             Self {
                 sb: SuperBlock::new(VIRTIOFS_MAGIC, BLOCK_SIZE, NAME_MAX),
                 root,
-                source,
+                tag,
                 device,
                 fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             }
@@ -141,9 +141,10 @@ impl FileSystem for VirtioFs {
     }
 
     fn source(&self) -> Option<&str> {
-        Some(&self.source)
+        Some(&self.tag)
     }
 
+    // lxh TODO: implement sync by issuing fsync to all open files and sync to the device if supported
     fn sync(&self) -> Result<()> {
         Ok(())
     }
@@ -617,7 +618,9 @@ impl PageCacheBackend for VirtioFsInode {
             .fuse_open(self.nodeid(), O_WRONLY)
             .and_then(|fh_out| {
                 let fh = fh_out.fh;
-                let result = fs.device.fuse_write(self.nodeid(), fh, offset as u64, &data);
+                let result = fs
+                    .device
+                    .fuse_write(self.nodeid(), fh, offset as u64, &data);
                 let _ = fs.device.fuse_release(self.nodeid(), fh, O_WRONLY);
                 result
             })
@@ -981,10 +984,6 @@ impl Inode for VirtioFsInode {
 
     fn fs(&self) -> Arc<dyn FileSystem> {
         self.fs_ref()
-    }
-
-    fn sync_all(&self) -> Result<()> {
-        self.flush_page_cache()
     }
 
     fn sync_data(&self) -> Result<()> {
