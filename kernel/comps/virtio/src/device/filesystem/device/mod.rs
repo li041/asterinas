@@ -115,7 +115,7 @@ impl core::fmt::Debug for FileSystemDevice {
     }
 }
 
-mod fuse_client;
+mod client;
 mod helpers;
 mod virtio_ops;
 

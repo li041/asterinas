@@ -177,11 +177,10 @@ impl FileSystemDevice {
         self.wait_for_unique_early(queue_index, unique as usize)
     }
 
-    pub(super) fn read_reply_header(
+    pub(super) fn check_reply(
         &self,
         out_header_slice: &Slice<FsDmaBuf>,
         unique: u64,
-        op_name: &str,
         map_fs_error: bool,
     ) -> Result<OutHeader, VirtioDeviceError> {
         out_header_slice
@@ -191,8 +190,8 @@ impl FileSystemDevice {
         let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
         if out_header.unique != unique || out_header.error != 0 {
             warn!(
-                "{} {} failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, op_name, out_header.unique, out_header.error, out_header.len
+                "{} failed: unique={}, error={}, out_len={}",
+                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
             );
             if map_fs_error && out_header.unique == unique && out_header.error != 0 {
                 return Err(VirtioDeviceError::FileSystemError(out_header.error));
