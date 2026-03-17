@@ -17,12 +17,15 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, init_in, size_of::<InitOut>());
 
-        self.submit_request_and_wait_early(
-            0,
+        let selector = QueueSelector::Request(0);
+        self.submit_request(
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
         )?;
+
+        self.wait_for_unique_early(selector, unique as usize)?;
 
         self.check_reply(&out_header_slice, unique, false)?;
 
@@ -66,8 +69,9 @@ impl FileSystemDevice {
         let out_header_slice = self.prepare_out_header_buf();
         let out_payload_slice = self.prepare_out_payload_buf(size_of::<EntryOut>());
 
+        let selector = self.select_request_queue(parent_nodeid);
         self.submit_request_and_wait(
-            parent_nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -105,8 +109,9 @@ impl FileSystemDevice {
 
         let in_name_slice = self.prepare_in_name_buf(name);
 
+        let selector = self.select_request_queue(parent_nodeid);
         self.submit_request_and_wait(
-            parent_nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -138,8 +143,9 @@ impl FileSystemDevice {
 
         let out_header_slice = self.prepare_out_header_buf();
 
+        let selector = self.select_request_queue(parent_nodeid);
         self.submit_request_and_wait(
-            parent_nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_name_slice],
             &[&out_header_slice],
@@ -164,9 +170,9 @@ impl FileSystemDevice {
         let in_name_slice = self.prepare_in_name_buf(name);
 
         let out_header_slice = self.prepare_out_header_buf();
-
+        let selector = self.select_request_queue(parent_nodeid);
         self.submit_request_and_wait(
-            parent_nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_name_slice],
             &[&out_header_slice],
@@ -200,8 +206,10 @@ impl FileSystemDevice {
 
         let in_name_slice = self.prepare_in_name_buf(name);
 
+        let selector = self.select_request_queue(parent_nodeid);
+
         self.submit_request_and_wait(
-            parent_nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -233,8 +241,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, getattr_in, size_of::<FuseAttrOut>());
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -264,8 +273,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, setattr_in, size_of::<FuseAttrOut>());
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -295,8 +305,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -334,8 +345,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, read_in, out_payload_size);
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -401,8 +413,9 @@ impl FileSystemDevice {
         let in_payload_slice = self.prepare_in_payload_buf(release_in);
         let out_header_slice = self.prepare_out_header_buf();
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice],
@@ -427,8 +440,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -460,8 +474,9 @@ impl FileSystemDevice {
         let in_payload_slice = self.prepare_in_payload_buf(release_in);
         let out_header_slice = self.prepare_out_header_buf();
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice],
@@ -493,8 +508,9 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, read_in, out_payload_size);
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -539,8 +555,9 @@ impl FileSystemDevice {
 
         let in_data_slice = self.prepare_in_data_buf(data);
 
+        let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
-            nodeid,
+            selector,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_data_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -575,14 +592,8 @@ impl FileSystemDevice {
         let in_header_slice = self.prepare_in_header_buf(in_header);
         let in_payload_slice = self.prepare_in_payload_buf(forget_in);
 
-        {
-            let mut queue = self.hiprio_queue.queue.lock();
-            let token = queue.add_dma_buf(&[&in_header_slice, &in_payload_slice], &[])?;
-            self.register_pending_request_on_queue(QueueSelector::Hiprio, token, unique);
-            if queue.should_notify() {
-                queue.notify();
-            }
-        }
+        let selctor = QueueSelector::Hiprio;
+        self.submit_request(selctor, unique, &[&in_header_slice, &in_payload_slice], &[])?;
 
         Ok(())
     }
