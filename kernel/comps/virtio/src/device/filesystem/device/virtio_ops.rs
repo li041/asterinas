@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use super::*;
+use crate::queue;
 
 impl FileSystemDevice {
     pub fn negotiate_features(features: u64) -> u64 {
@@ -65,7 +66,7 @@ impl FileSystemDevice {
             .unwrap();
         let device_for_hiprio_callback = device.clone();
         let hiprio_wakeup_callback = move |_: &TrapFrame| {
-            device_for_hiprio_callback.handle_queue_irq(RequestQueueSelector::Hiprio);
+            device_for_hiprio_callback.handle_queue_irq(QueueSelector::Hiprio);
         };
         transport
             .register_queue_callback(HIPRIO_QUEUE_INDEX, Box::new(hiprio_wakeup_callback), false)
@@ -74,7 +75,7 @@ impl FileSystemDevice {
             let queue_idx = special_queues_count + idx as u16;
             let device_for_callback = device.clone();
             let wakeup_callback = move |_: &TrapFrame| {
-                device_for_callback.handle_queue_irq(RequestQueueSelector::Request(
+                device_for_callback.handle_queue_irq(QueueSelector::Request(
                     (queue_idx - special_queues_count) as usize,
                 ));
             };
@@ -111,7 +112,7 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    pub(super) fn new_queue(
+    fn new_queue(
         index: u16,
         transport: &mut dyn VirtioTransport,
     ) -> Result<VirtQueue, VirtioDeviceError> {
@@ -123,14 +124,14 @@ impl FileSystemDevice {
         VirtQueue::new(index, queue_size, transport).map_err(Into::into)
     }
 
-    pub(super) fn queue_state(&self, selector: RequestQueueSelector) -> &FsRequestQueue {
+    pub(super) fn queue(&self, selector: QueueSelector) -> &FsRequestQueue {
         match selector {
-            RequestQueueSelector::Hiprio => &self.hiprio_queue,
-            RequestQueueSelector::Request(index) => &self.request_queues[index],
+            QueueSelector::Hiprio => &self.hiprio_queue,
+            QueueSelector::Request(index) => &self.request_queues[index],
         }
     }
 
-    pub(super) fn select_request_queue_for_node(&self, nodeid: u64) -> usize {
+    fn select_request_queue(&self, nodeid: u64) -> usize {
         let request_queue_count = self.request_queues.len();
         if request_queue_count <= 1 {
             return 0;
@@ -139,13 +140,34 @@ impl FileSystemDevice {
         (nodeid as usize) % request_queue_count
     }
 
-    pub(super) fn submit_request_and_wait(
+    pub(super) fn submit_request(
         &self,
-        queue_index: usize,
+        nodeid: u64,
         unique: u64,
         in_slices: &[&Slice<FsDmaBuf>],
         out_slices: &[&Slice<FsDmaBuf>],
     ) -> Result<(), VirtioDeviceError> {
+        let queue_index = self.select_request_queue(nodeid);
+
+        let mut queue = self.request_queues[queue_index].queue.lock();
+        let token = queue.add_dma_buf(in_slices, out_slices)?;
+        self.register_pending_request(queue_index, token, unique);
+        if queue.should_notify() {
+            queue.notify();
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn submit_request_and_wait(
+        &self,
+        nodeid: u64,
+        unique: u64,
+        in_slices: &[&Slice<FsDmaBuf>],
+        out_slices: &[&Slice<FsDmaBuf>],
+    ) -> Result<(), VirtioDeviceError> {
+        let queue_index = self.select_request_queue(nodeid);
+
         {
             let mut queue = self.request_queues[queue_index].queue.lock();
             let token = queue.add_dma_buf(in_slices, out_slices)?;
@@ -203,29 +225,16 @@ impl FileSystemDevice {
     }
 
     pub(super) fn register_pending_request(&self, queue_index: usize, token: u16, unique: u64) {
-        self.register_pending_request_with_reply(queue_index, token, unique);
-    }
-
-    pub(super) fn register_pending_request_with_reply(
-        &self,
-        queue_index: usize,
-        token: u16,
-        unique: u64,
-    ) {
-        self.register_pending_request_on_queue(
-            RequestQueueSelector::Request(queue_index),
-            token,
-            unique,
-        );
+        self.register_pending_request_on_queue(QueueSelector::Request(queue_index), token, unique);
     }
 
     pub(super) fn register_pending_request_on_queue(
         &self,
-        selector: RequestQueueSelector,
+        selector: QueueSelector,
         token: u16,
         unique: u64,
     ) {
-        let queue_state = self.queue_state(selector);
+        let queue_state = self.queue(selector);
         queue_state
             .pending_requests
             .disable_irq()
@@ -233,8 +242,8 @@ impl FileSystemDevice {
             .insert(token, unique as usize);
     }
 
-    pub(super) fn handle_queue_irq(&self, selector: RequestQueueSelector) {
-        let queue_state = self.queue_state(selector);
+    pub(super) fn handle_queue_irq(&self, selector: QueueSelector) {
+        let queue_state = self.queue(selector);
         loop {
             let pop_result = {
                 let mut queue = queue_state.queue.lock();
@@ -270,20 +279,16 @@ impl FileSystemDevice {
         }
     }
 
-    pub(super) fn wait_for_unique(
-        &self,
-        queue_index: usize,
-        unique: usize,
-    ) -> Result<(), VirtioDeviceError> {
-        self.wait_for_unique_on(RequestQueueSelector::Request(queue_index), unique)
+    fn wait_for_unique(&self, queue_index: usize, unique: usize) -> Result<(), VirtioDeviceError> {
+        self.wait_for_unique_on(QueueSelector::Request(queue_index), unique)
     }
 
     pub(super) fn wait_for_unique_on(
         &self,
-        selector: RequestQueueSelector,
+        selector: QueueSelector,
         unique: usize,
     ) -> Result<(), VirtioDeviceError> {
-        let queue_state = self.queue_state(selector);
+        let queue_state = self.queue(selector);
 
         {
             let mut request_states = queue_state.request_states.disable_irq().lock();
@@ -357,8 +362,8 @@ impl FileSystemDevice {
         queue_index: usize,
         unique: usize,
     ) -> Result<(), VirtioDeviceError> {
-        let selector = RequestQueueSelector::Request(queue_index);
-        let queue_state = self.queue_state(selector);
+        let selector = QueueSelector::Request(queue_index);
+        let queue_state = self.queue(selector);
 
         loop {
             self.handle_queue_irq(selector);

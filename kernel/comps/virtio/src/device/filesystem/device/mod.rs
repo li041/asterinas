@@ -88,7 +88,7 @@ impl core::fmt::Debug for FsRequestQueue {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum RequestQueueSelector {
+enum QueueSelector {
     Hiprio,
     Request(usize),
 }
