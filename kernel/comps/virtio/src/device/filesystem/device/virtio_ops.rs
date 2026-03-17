@@ -85,7 +85,7 @@ impl FileSystemDevice {
         transport.finish_init();
         drop(transport);
 
-        device.send_fuse_init()?;
+        device.fuse_init()?;
 
         FILESYSTEM_DEVICES
             .call_once(|| SpinLock::new(Vec::new()))
@@ -128,6 +128,15 @@ impl FileSystemDevice {
             RequestQueueSelector::Hiprio => &self.hiprio_queue,
             RequestQueueSelector::Request(index) => &self.request_queues[index],
         }
+    }
+
+    pub(super) fn select_request_queue_for_node(&self, nodeid: u64) -> usize {
+        let request_queue_count = self.request_queues.len();
+        if request_queue_count <= 1 {
+            return 0;
+        }
+
+        (nodeid as usize) % request_queue_count
     }
 
     pub(super) fn submit_request_and_wait(

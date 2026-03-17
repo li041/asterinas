@@ -297,7 +297,7 @@ impl VirtioFsInode {
             return;
         };
 
-        let _ = fs.device.forget_lookup(nodeid, nlookup);
+        let _ = fs.device.forget(nodeid, nlookup);
     }
 
     fn revalidate_lookup(&self) -> Result<()> {
@@ -322,7 +322,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let entry_out = fs
             .device
-            .lookup_entry(parent_nodeid, &name)
+            .lookup(parent_nodeid, &name)
             .map_err(map_virtiofs_error)?;
         self.increase_lookup_count(1);
 
@@ -813,7 +813,7 @@ impl Inode for VirtioFsInode {
         let parent_nodeid = self.nodeid();
         let entry_out = fs
             .device
-            .lookup_entry(parent_nodeid, name)
+            .lookup(parent_nodeid, name)
             .map_err(map_virtiofs_error)?;
         let nodeid = entry_out.nodeid;
         let now = MonotonicCoarseClock::get().read_time();

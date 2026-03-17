@@ -3,7 +3,7 @@
 use super::*;
 
 impl FileSystemDevice {
-    pub(crate) fn send_fuse_init(&self) -> Result<(), VirtioDeviceError> {
+    pub(crate) fn fuse_init(&self) -> Result<(), VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -46,24 +46,10 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    pub fn lookup(&self, parent_nodeid: u64, name: &str) -> Result<u64, VirtioDeviceError> {
-        Ok(self.lookup_entry(parent_nodeid, name)?.nodeid)
-    }
-
-    pub fn lookup_entry(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-    ) -> Result<EntryOut, VirtioDeviceError> {
-        self.lookup_entry_inner(parent_nodeid, name)
-    }
-
-    fn lookup_entry_inner(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-    ) -> Result<EntryOut, VirtioDeviceError> {
+    // lxh Todo: 需要修改接口调用
+    pub fn lookup(&self, parent_nodeid: u64, name: &str) -> Result<EntryOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
+
         let in_header = InHeader::new(
             (size_of::<InHeader>() + name.len() + 1) as u32,
             FUSE_OPCODE_LOOKUP,
@@ -84,9 +70,10 @@ impl FileSystemDevice {
             .unwrap();
 
         let out_payload_slice = Slice::new(out_payload_buf.clone(), 0..size_of::<EntryOut>());
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -131,13 +118,6 @@ impl FileSystemDevice {
             .unwrap();
         let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
         Ok(entry_out)
-    }
-
-    pub fn forget_lookup(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
-        if nodeid == FUSE_ROOT_ID || nlookup == 0 {
-            return Ok(());
-        }
-        self.send_fuse_forget(nodeid, nlookup)
     }
 
     pub fn getattr_node(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
@@ -217,9 +197,10 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_to_device(in_name_slice.offset().clone())
             .unwrap();
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -278,9 +259,10 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_to_device(in_name_slice.offset().clone())
             .unwrap();
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
 
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_name_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -319,8 +301,9 @@ impl FileSystemDevice {
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, getattr_in, size_of::<FuseAttrOut>());
+        let queue_index = self.select_request_queue_for_node(nodeid);
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -346,8 +329,9 @@ impl FileSystemDevice {
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, setattr_in, size_of::<FuseAttrOut>());
+        let queue_index = self.select_request_queue_for_node(nodeid);
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -373,8 +357,9 @@ impl FileSystemDevice {
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
+        let queue_index = self.select_request_queue_for_node(nodeid);
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -408,20 +393,21 @@ impl FileSystemDevice {
         let out_payload_size = size as usize;
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, read_in, out_payload_size);
+        let queue_index = self.select_request_queue_for_node(nodeid);
 
         {
-            let mut queue = self.request_queues[0].queue.lock();
+            let mut queue = self.request_queues[queue_index].queue.lock();
             let token = queue.add_dma_buf(
                 &[&in_header_slice, &in_payload_slice],
                 &[&out_header_slice, &out_payload_slice],
             )?;
-            self.register_pending_request(0, token, unique);
+            self.register_pending_request(queue_index, token, unique);
             if queue.should_notify() {
                 queue.notify();
             }
         };
 
-        self.wait_for_unique(0, unique)?;
+        self.wait_for_unique(queue_index, unique)?;
 
         out_header_slice
             .mem_obj()
@@ -499,20 +485,21 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_to_device(in_header_slice.offset().clone())
             .unwrap();
+        let queue_index = self.select_request_queue_for_node(nodeid);
 
         let out_header_slice = Slice::new(out_header_buf.clone(), 0..size_of::<OutHeader>());
 
         {
-            let mut queue = self.request_queues[0].queue.lock();
+            let mut queue = self.request_queues[queue_index].queue.lock();
             let token =
                 queue.add_dma_buf(&[&in_header_slice, &in_payload_slice], &[&out_header_slice])?;
-            self.register_pending_request(0, token, unique);
+            self.register_pending_request(queue_index, token, unique);
             if queue.should_notify() {
                 queue.notify();
             }
         };
 
-        self.wait_for_unique(0, unique)?;
+        self.wait_for_unique(queue_index, unique)?;
 
         out_header_slice
             .mem_obj()
@@ -550,20 +537,21 @@ impl FileSystemDevice {
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
+        let queue_index = self.select_request_queue_for_node(nodeid);
 
         {
-            let mut queue = self.request_queues[0].queue.lock();
+            let mut queue = self.request_queues[queue_index].queue.lock();
             let token = queue.add_dma_buf(
                 &[&in_header_slice, &in_payload_slice],
                 &[&out_header_slice, &out_payload_slice],
             )?;
-            self.register_pending_request(0, token, unique);
+            self.register_pending_request(queue_index, token, unique);
             if queue.should_notify() {
                 queue.notify();
             }
         };
 
-        self.wait_for_unique(0, unique)?;
+        self.wait_for_unique(queue_index, unique)?;
 
         out_header_slice
             .mem_obj()
@@ -611,8 +599,9 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_to_device(in_name_slice.offset().clone())
             .unwrap();
+        let queue_index = self.select_request_queue_for_node(parent_nodeid);
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_name_slice],
             &[&out_header_slice],
@@ -643,9 +632,10 @@ impl FileSystemDevice {
         let out_header_slice = self.prepare_out_header_buf();
 
         let in_payload_slice = self.prepare_in_payload_buf(release_in);
+        let queue_index = self.select_request_queue_for_node(nodeid);
 
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice],
@@ -674,8 +664,9 @@ impl FileSystemDevice {
         let out_payload_size = size as usize;
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, read_in, out_payload_size);
+        let queue_index = self.select_request_queue_for_node(nodeid);
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -726,9 +717,10 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_to_device(in_data_slice.offset().clone())
             .unwrap();
+        let queue_index = self.select_request_queue_for_node(nodeid);
 
         self.submit_request_and_wait(
-            0,
+            queue_index,
             unique,
             &[&in_header_slice, &in_payload_slice, &in_data_slice],
             &[&out_header_slice, &out_payload_slice],
@@ -741,6 +733,13 @@ impl FileSystemDevice {
             .unwrap();
         let write_out: WriteOut = out_payload_slice.read_val(0).unwrap();
         Ok(write_out.size as usize)
+    }
+
+    pub fn forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
+        if nodeid == FUSE_ROOT_ID || nlookup == 0 {
+            return Ok(());
+        }
+        self.send_fuse_forget(nodeid, nlookup)
     }
 
     fn send_fuse_forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
