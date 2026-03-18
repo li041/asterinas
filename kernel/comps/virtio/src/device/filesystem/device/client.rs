@@ -93,7 +93,7 @@ impl FileSystemDevice {
         parent_nodeid: u64,
         name: &str,
         mode: u32,
-    ) -> Result<u64, VirtioDeviceError> {
+    ) -> Result<EntryOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -125,7 +125,7 @@ impl FileSystemDevice {
             .unwrap();
         let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
 
-        Ok(entry_out.nodeid)
+        Ok(entry_out)
     }
 
     pub fn fuse_unlink(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
@@ -188,7 +188,7 @@ impl FileSystemDevice {
         parent_nodeid: u64,
         name: &str,
         mode: u32,
-    ) -> Result<(u64, FuseOpenOut), VirtioDeviceError> {
+    ) -> Result<(EntryOut, OpenOut), VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -200,7 +200,7 @@ impl FileSystemDevice {
 
         let create_in = CreateIn::new(O_RDWR, mode);
 
-        let out_payload_size = size_of::<EntryOut>() + size_of::<FuseOpenOut>();
+        let out_payload_size = size_of::<EntryOut>() + size_of::<OpenOut>();
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, create_in, out_payload_size);
 
@@ -222,21 +222,21 @@ impl FileSystemDevice {
             .sync_from_device(out_payload_slice.offset().clone())
             .unwrap();
         let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
-        let open_out: FuseOpenOut = out_payload_slice.read_val(size_of::<EntryOut>()).unwrap();
+        let open_out: OpenOut = out_payload_slice.read_val(size_of::<EntryOut>()).unwrap();
 
-        Ok((entry_out.nodeid, open_out))
+        Ok((entry_out, open_out))
     }
 
     pub fn fuse_getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<FuseGetattrIn>()) as u32,
+            (size_of::<InHeader>() + size_of::<GetattrIn>()) as u32,
             FUSE_OPCODE_GETATTR,
             unique,
             nodeid,
         );
-        let getattr_in = FuseGetattrIn::new(0);
+        let getattr_in = GetattrIn::new(0);
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, getattr_in, size_of::<FuseAttrOut>());
@@ -303,7 +303,7 @@ impl FileSystemDevice {
         let open_in = OpenIn::new(0);
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
+            self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>());
 
         let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
@@ -319,7 +319,7 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_from_device(out_payload_slice.offset().clone())
             .unwrap();
-        let open_out: FuseOpenOut = out_payload_slice.read_val(0).unwrap();
+        let open_out: OpenOut = out_payload_slice.read_val(0).unwrap();
 
         Ok(open_out.fh)
     }
@@ -426,7 +426,7 @@ impl FileSystemDevice {
         Ok(())
     }
 
-    pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<FuseOpenOut, VirtioDeviceError> {
+    pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<OpenOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -438,7 +438,7 @@ impl FileSystemDevice {
         let open_in = OpenIn::new(flags);
 
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, open_in, size_of::<FuseOpenOut>());
+            self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>());
 
         let selector = self.select_request_queue(nodeid);
         self.submit_request_and_wait(
@@ -454,7 +454,7 @@ impl FileSystemDevice {
             .mem_obj()
             .sync_from_device(out_payload_slice.offset().clone())
             .unwrap();
-        let open_out: FuseOpenOut = out_payload_slice.read_val(0).unwrap();
+        let open_out: OpenOut = out_payload_slice.read_val(0).unwrap();
 
         Ok(open_out)
     }

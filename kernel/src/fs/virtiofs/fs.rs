@@ -184,11 +184,7 @@ struct VirtioFsHandle {
 }
 
 impl VirtioFsInode {
-    fn new(nodeid: u64, metadata: Metadata, fs: Weak<VirtioFs>) -> Arc<Self> {
-        Self::new_with_entry_valid(nodeid, metadata, fs, None)
-    }
-
-    fn new_with_entry_valid(
+    fn new(
         nodeid: u64,
         metadata: Metadata,
         fs: Weak<VirtioFs>,
@@ -781,7 +777,7 @@ impl Inode for VirtioFsInode {
             entry_out.attr_valid_nsec,
         )));
 
-        let inode = VirtioFsInode::new_with_entry_valid(
+        let inode = VirtioFsInode::new(
             nodeid,
             metadata_from_attr(entry_out.attr),
             Arc::downgrade(&fs),
@@ -800,20 +796,20 @@ impl Inode for VirtioFsInode {
 
         let fs = self.fs_ref();
         let parent_nodeid = self.nodeid();
-        let (nodeid, opened_open_out) = match type_ {
+        let (entry_out, opened_open_out) = match type_ {
             InodeType::File => {
-                let (nodeid, open_out) = fs
+                let (entry_out, open_out) = fs
                     .device
                     .fuse_create(parent_nodeid, name, S_IFREG | mode.bits() as u32)
                     .map_err(map_virtiofs_error)?;
-                (nodeid, Some(open_out))
+                (entry_out, Some(open_out))
             }
             InodeType::Dir => {
-                let nodeid = fs
+                let entry_out = fs
                     .device
                     .fuse_mkdir(parent_nodeid, name, S_IFDIR | mode.bits() as u32)
                     .map_err(map_virtiofs_error)?;
-                (nodeid, None)
+                (entry_out, None)
             }
             _ => {
                 return_errno_with_message!(
@@ -824,20 +820,32 @@ impl Inode for VirtioFsInode {
         };
         let attr_out: FuseAttrOut = fs
             .device
-            .fuse_getattr(nodeid)
+            .fuse_getattr(entry_out.nodeid)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs getattr after create failed"))?;
 
         if let Some(open_out) = opened_open_out {
-            let _ = fs.device.fuse_release(nodeid, open_out.fh, O_RDWR);
+            let _ = fs
+                .device
+                .fuse_release(entry_out.nodeid, open_out.fh, O_RDWR);
         }
 
         let now = MonotonicCoarseClock::get().read_time();
+
+        let entry_valid_until = Some(now.saturating_add(valid_duration(
+            entry_out.entry_valid,
+            entry_out.entry_valid_nsec,
+        )));
         let attr_valid_until = Some(now.saturating_add(valid_duration(
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
         )));
 
-        let inode = VirtioFsInode::new(nodeid, metadata_from_attr(attr_out.attr), Arc::downgrade(&fs));
+        let inode = VirtioFsInode::new(
+            entry_out.nodeid,
+            metadata_from_attr(attr_out.attr),
+            Arc::downgrade(&fs),
+            entry_valid_until,
+        );
         *inode.attr_valid_until.write() = attr_valid_until;
         inode.increase_lookup_count(1);
 

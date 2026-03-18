@@ -132,7 +132,7 @@ impl ReleaseIn {
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
-pub struct FuseOpenOut {
+pub struct OpenOut {
     pub fh: u64,
     pub open_flags: u32,
     pub padding: u32,
@@ -143,7 +143,7 @@ pub const FOPEN_KEEP_CACHE: u32 = 1 << 1;
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
-pub struct FuseGetattrIn {
+pub struct GetattrIn {
     pub getattr_flags: u32,
     pub dummy: u32,
     pub fh: u64,
@@ -205,7 +205,7 @@ impl SetattrIn {
     }
 }
 
-impl FuseGetattrIn {
+impl GetattrIn {
     pub const fn new(fh: u64) -> Self {
         Self {
             getattr_flags: 0,
