@@ -80,7 +80,7 @@ impl FsType for VirtioFsType {
         let device = get_device_by_tag(&tag)
             .ok_or_else(|| Error::with_message(Errno::ENODEV, "virtiofs device tag not found"))?;
 
-        Ok(VirtioFs::new(device, tag) as _)
+        Ok(VirtioFs::new(device, tag)? as _)
     }
 
     fn sysnode(&self) -> Option<Arc<dyn aster_systree::SysNode>> {
@@ -97,33 +97,15 @@ pub struct VirtioFs {
 }
 
 impl VirtioFs {
-    fn new(device: Arc<FileSystemDevice>, tag: String) -> Arc<Self> {
-        Arc::new_cyclic(|weak_fs| {
-            let root_attr = device
-                .fuse_getattr(FUSE_ROOT_ID)
-                .ok()
-                .map(|attr_out| attr_out.attr)
-                .unwrap_or(Attr {
-                    ino: FUSE_ROOT_ID,
-                    size: 0,
-                    blocks: 0,
-                    atime: 0,
-                    mtime: 0,
-                    ctime: 0,
-                    atimensec: 0,
-                    mtimensec: 0,
-                    ctimensec: 0,
-                    mode: 0o040755,
-                    nlink: 2,
-                    uid: 0,
-                    gid: 0,
-                    rdev: 0,
-                    blksize: BLOCK_SIZE as u32,
-                    padding: 0,
-                });
+    fn new(device: Arc<FileSystemDevice>, tag: String) -> Result<Arc<Self>> {
+        let root_attr = device
+            .fuse_getattr(FUSE_ROOT_ID)
+            .map_err(map_virtiofs_error)?
+            .attr;
+        let root_metadata = metadata_from_attr(root_attr);
 
-            let root_metadata = metadata_from_attr(root_attr);
-            let root = VirtioFsInode::new(FUSE_ROOT_ID, root_metadata, weak_fs.clone());
+        Ok(Arc::new_cyclic(|weak_fs| {
+            let root = VirtioFsInode::new(FUSE_ROOT_ID, root_metadata, weak_fs.clone(), None);
 
             Self {
                 sb: SuperBlock::new(VIRTIOFS_MAGIC, BLOCK_SIZE, NAME_MAX),
@@ -132,7 +114,7 @@ impl VirtioFs {
                 device,
                 fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             }
-        })
+        }))
     }
 }
 
