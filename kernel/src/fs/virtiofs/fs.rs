@@ -96,7 +96,7 @@ pub struct VirtioFs {
 impl VirtioFs {
     fn new(device: Arc<FileSystemDevice>, tag: String) -> Result<Arc<Self>> {
         let root_attr = device.fuse_getattr(FUSE_ROOT_ID).map_err(Error::from)?.attr;
-        let root_metadata = metadata_from_attr(root_attr);
+        let root_metadata = Metadata::from(root_attr);
 
         Ok(Arc::new_cyclic(|weak_fs| {
             let root = VirtioFsInode::new(FUSE_ROOT_ID, root_metadata, weak_fs.clone(), None);
@@ -239,7 +239,7 @@ impl VirtioFsInode {
             return_errno_with_message!(Errno::ENOENT, "virtiofs stale dentry after revalidate");
         }
 
-        *self.metadata.write() = metadata_from_attr(entry_out.attr);
+        *self.metadata.write() = Metadata::from(entry_out.attr);
 
         let now = MonotonicCoarseClock::get().read_time();
         *self.entry_valid_until.write() = Some(now.saturating_add(valid_duration(
@@ -279,7 +279,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let attr_out = fs.device.fuse_getattr(self.nodeid()).map_err(Error::from)?;
 
-        let new_metadata = metadata_from_attr(attr_out.attr);
+        let new_metadata = Metadata::from(attr_out.attr);
         if old_metadata.mtime != new_metadata.mtime {
             self.invalidate_page_cache_locked(new_metadata.size)?;
         } else if let Some(page_cache) = &self.page_cache
@@ -633,7 +633,7 @@ impl Inode for VirtioFsInode {
             .fuse_setattr(self.nodeid(), size)
             .map_err(Error::from)?;
 
-        let new_metadata = metadata_from_attr(attr_out.attr);
+        let new_metadata = Metadata::from(attr_out.attr);
         {
             let _guard = self.cache_lock.lock();
             if let Some(page_cache) = &self.page_cache {
@@ -752,7 +752,7 @@ impl Inode for VirtioFsInode {
 
         let inode = VirtioFsInode::new(
             nodeid,
-            metadata_from_attr(entry_out.attr),
+            Metadata::from(entry_out.attr),
             Arc::downgrade(&fs),
             entry_valid_until,
         );
@@ -815,7 +815,7 @@ impl Inode for VirtioFsInode {
 
         let inode = VirtioFsInode::new(
             entry_out.nodeid,
-            metadata_from_attr(attr_out.attr),
+            Metadata::from(attr_out.attr),
             Arc::downgrade(&fs),
             entry_valid_until,
         );
@@ -918,22 +918,24 @@ fn inode_type_from_dirent_type(type_: u32) -> InodeType {
     }
 }
 
-fn metadata_from_attr(attr: Attr) -> Metadata {
-    Metadata {
-        dev: 0,
-        ino: attr.ino,
-        size: attr.size as usize,
-        blk_size: attr.blksize as usize,
-        blocks: attr.blocks as usize,
-        atime: Duration::new(attr.atime, attr.atimensec),
-        mtime: Duration::new(attr.mtime, attr.mtimensec),
-        ctime: Duration::new(attr.ctime, attr.ctimensec),
-        type_: InodeType::from_raw_mode(attr.mode as u16).unwrap_or(InodeType::Unknown),
-        mode: InodeMode::from_bits_truncate(attr.mode as u16),
-        nlinks: attr.nlink as usize,
-        uid: Uid::new(attr.uid),
-        gid: Gid::new(attr.gid),
-        rdev: attr.rdev as u64,
+impl From<Attr> for Metadata {
+    fn from(attr: Attr) -> Self {
+        Metadata {
+            dev: 0,
+            ino: attr.ino,
+            size: attr.size as usize,
+            blk_size: attr.blksize as usize,
+            blocks: attr.blocks as usize,
+            atime: Duration::new(attr.atime, attr.atimensec),
+            mtime: Duration::new(attr.mtime, attr.mtimensec),
+            ctime: Duration::new(attr.ctime, attr.ctimensec),
+            type_: InodeType::from_raw_mode(attr.mode as u16).unwrap_or(InodeType::Unknown),
+            mode: InodeMode::from_bits_truncate(attr.mode as u16),
+            nlinks: attr.nlink as usize,
+            uid: Uid::new(attr.uid),
+            gid: Gid::new(attr.gid),
+            rdev: attr.rdev as u64,
+        }
     }
 }
 
