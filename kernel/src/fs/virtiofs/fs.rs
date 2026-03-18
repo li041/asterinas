@@ -11,12 +11,9 @@ use core::{
 };
 
 use aster_block::bio::BioWaiter;
-use aster_virtio::device::{
-    VirtioDeviceError,
-    filesystem::{
-        device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-        protocol::{Attr, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
-    },
+use aster_virtio::device::filesystem::{
+    device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
+    protocol::{Attr, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
 };
 use ostd::{
     mm::{HasSize, VmReader, VmWriter, io_util::HasVmReaderWriter},
@@ -98,10 +95,7 @@ pub struct VirtioFs {
 
 impl VirtioFs {
     fn new(device: Arc<FileSystemDevice>, tag: String) -> Result<Arc<Self>> {
-        let root_attr = device
-            .fuse_getattr(FUSE_ROOT_ID)
-            .map_err(map_virtiofs_error)?
-            .attr;
+        let root_attr = device.fuse_getattr(FUSE_ROOT_ID).map_err(Error::from)?.attr;
         let root_metadata = metadata_from_attr(root_attr);
 
         Ok(Arc::new_cyclic(|weak_fs| {
@@ -238,7 +232,7 @@ impl VirtioFsInode {
         let entry_out = fs
             .device
             .fuse_lookup(parent_nodeid, name)
-            .map_err(map_virtiofs_error)?;
+            .map_err(Error::from)?;
         self.increase_lookup_count(1);
 
         if entry_out.nodeid != old_nodeid {
@@ -283,10 +277,7 @@ impl VirtioFsInode {
 
         let old_metadata = self.metadata();
         let fs = self.fs_ref();
-        let attr_out = fs
-            .device
-            .fuse_getattr(self.nodeid())
-            .map_err(map_virtiofs_error)?;
+        let attr_out = fs.device.fuse_getattr(self.nodeid()).map_err(Error::from)?;
 
         let new_metadata = metadata_from_attr(attr_out.attr);
         if old_metadata.mtime != new_metadata.mtime {
@@ -640,7 +631,7 @@ impl Inode for VirtioFsInode {
         let attr_out = fs
             .device
             .fuse_setattr(self.nodeid(), size)
-            .map_err(map_virtiofs_error)?;
+            .map_err(Error::from)?;
 
         let new_metadata = metadata_from_attr(attr_out.attr);
         {
@@ -747,7 +738,7 @@ impl Inode for VirtioFsInode {
         let entry_out = fs
             .device
             .fuse_lookup(parent_nodeid, name)
-            .map_err(map_virtiofs_error)?;
+            .map_err(Error::from)?;
         let nodeid = entry_out.nodeid;
         let now = MonotonicCoarseClock::get().read_time();
         let entry_valid_until = Some(now.saturating_add(valid_duration(
@@ -783,14 +774,14 @@ impl Inode for VirtioFsInode {
                 let (entry_out, open_out) = fs
                     .device
                     .fuse_create(parent_nodeid, name, S_IFREG | mode.bits() as u32)
-                    .map_err(map_virtiofs_error)?;
+                    .map_err(Error::from)?;
                 (entry_out, Some(open_out))
             }
             InodeType::Dir => {
                 let entry_out = fs
                     .device
                     .fuse_mkdir(parent_nodeid, name, S_IFDIR | mode.bits() as u32)
-                    .map_err(map_virtiofs_error)?;
+                    .map_err(Error::from)?;
                 (entry_out, None)
             }
             _ => {
@@ -843,7 +834,7 @@ impl Inode for VirtioFsInode {
         let fs = self.fs_ref();
         fs.device
             .fuse_unlink(self.nodeid(), name)
-            .map_err(map_virtiofs_error)
+            .map_err(Error::from)
     }
 
     fn rmdir(&self, name: &str) -> Result<()> {
@@ -855,7 +846,7 @@ impl Inode for VirtioFsInode {
         let fs = self.fs_ref();
         fs.device
             .fuse_rmdir(self.nodeid(), name)
-            .map_err(map_virtiofs_error)
+            .map_err(Error::from)
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
@@ -950,30 +941,4 @@ fn valid_duration(secs: u64, nsecs: u32) -> Duration {
     let extra_secs = (nsecs / 1_000_000_000) as u64;
     let nanos = (nsecs % 1_000_000_000) as u64;
     Duration::from_secs(secs.saturating_add(extra_secs)).saturating_add(Duration::from_nanos(nanos))
-}
-
-fn map_virtiofs_error(err: VirtioDeviceError) -> Error {
-    match err {
-        VirtioDeviceError::FileSystemError(code) => {
-            let errno = match code {
-                -1 => Errno::EPERM,
-                -2 => Errno::ENOENT,
-                -5 => Errno::EIO,
-                -13 => Errno::EACCES,
-                -17 => Errno::EEXIST,
-                -20 => Errno::ENOTDIR,
-                -21 => Errno::EISDIR,
-                -22 => Errno::EINVAL,
-                -27 => Errno::EFBIG,
-                -28 => Errno::ENOSPC,
-                -30 => Errno::EROFS,
-                -36 => Errno::ENAMETOOLONG,
-                -39 => Errno::ENOTEMPTY,
-                -95 => Errno::EOPNOTSUPP,
-                _ => Errno::EIO,
-            };
-            Error::with_message(errno, "virtiofs operation failed")
-        }
-        _ => Error::with_message(Errno::EIO, "virtiofs device error"),
-    }
 }
