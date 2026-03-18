@@ -5,6 +5,7 @@
 use core::time::Duration;
 
 use inherit_methods_macro::inherit_methods;
+pub(in crate::fs) use dentry::Dentry;
 pub use mount::{Mount, MountPropType, PerMountFlags};
 pub use mount_namespace::MountNamespace;
 pub use resolver::{AT_FDCWD, AbsPathResult, FsPath, LookupResult, PathResolver, SplitPath};
@@ -12,7 +13,7 @@ pub use resolver::{AT_FDCWD, AbsPathResult, FsPath, LookupResult, PathResolver, 
 use crate::{
     fs::{
         inode_handle::InodeHandle,
-        path::dentry::{Dentry, DirDentry},
+        path::dentry::DirDentry,
         utils::{
             CreationFlags, FileSystem, FsFlags, Inode, InodeMode, InodeType, Metadata, MknodType,
             OpenArgs, Permission, StatusFlags, XattrName, XattrNamespace, XattrSetFlags,

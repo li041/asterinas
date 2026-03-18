@@ -17,7 +17,7 @@ use crate::{
     fs::{
         device::{Device, DeviceType},
         inode_handle::FileIo,
-        path::Path,
+        path::{Dentry, Path},
         utils::StatusFlags,
     },
     prelude::*,
@@ -385,13 +385,13 @@ pub trait Inode: Any + InodeIo + Send + Sync {
         true
     }
 
-    /// Revalidates a cached VFS dentry backed by this inode.
+    /// Revalidates a cached child dentry from its parent lookup context.
     ///
-    /// Returning `Ok(())` means the filesystem has guaranteed that the cached dentry
-    /// is still valid (possibly after a filesystem-specific refresh).
-    /// Returning `Err(_)` means the cached dentry cannot be used and the error should
-    /// be returned directly to the caller.
-    fn revalidate_dentry(&self) -> Result<()> {
+    /// Returning `Ok(())` means the filesystem has guaranteed that `child`
+    /// still matches `name` under the current parent context.
+    /// Returning `Err(_)` means the cached child dentry cannot be used and
+    /// the error should be returned directly to the caller.
+    fn revalidate_child(&self, name: &str, child: &Dentry) -> Result<()> {
         Ok(())
     }
 

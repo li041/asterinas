@@ -15,7 +15,7 @@ use aster_virtio::device::{
     VirtioDeviceError,
     filesystem::{
         device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-        protocol::{Attr, EntryOut, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
+        protocol::{Attr, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
     },
 };
 use ostd::{
@@ -27,6 +27,7 @@ use crate::{
     events::IoEvents,
     fs::{
         inode_handle::FileIo,
+        path::Dentry,
         registry::{FsProperties, FsType},
         utils::{
             AccessMode, CachePage, DirentVisitor, Extension, FileSystem, FsEventSubscriberStats,
@@ -167,8 +168,8 @@ struct VirtioFsInode {
     nodeid: AtomicU64,
     lookup_count: AtomicU64,
     metadata: RwLock<Metadata>,
+    entry_valid_until: RwLock<Option<Duration>>,
     attr_valid_until: RwLock<Option<Duration>>,
-    lookup_state: RwLock<LookupState>,
     page_cache: Option<PageCache>,
     cache_lock: Mutex<()>,
     fs: Weak<VirtioFs>,
@@ -182,81 +183,24 @@ struct VirtioFsHandle {
     cache_enabled: bool,
 }
 
-struct LookupState {
-    parent_nodeid: Option<u64>,
-    name: Option<String>,
-    entry_valid_until: Option<Duration>,
-}
-
-impl LookupState {
-    fn root() -> Self {
-        Self {
-            parent_nodeid: None,
-            name: None,
-            entry_valid_until: None,
-        }
-    }
-
-    fn from_lookup(parent_nodeid: u64, name: String, now: Duration, entry_out: EntryOut) -> Self {
-        Self {
-            parent_nodeid: Some(parent_nodeid),
-            name: Some(name),
-            entry_valid_until: Some(now.saturating_add(valid_duration(
-                entry_out.entry_valid,
-                entry_out.entry_valid_nsec,
-            ))),
-        }
-    }
-
-    fn with_parent_name(parent_nodeid: u64, name: String) -> Self {
-        Self {
-            parent_nodeid: Some(parent_nodeid),
-            name: Some(name),
-            entry_valid_until: None,
-        }
-    }
-
-    fn is_stale(&self, now: Duration) -> bool {
-        if self.parent_nodeid.is_none() || self.name.is_none() {
-            return false;
-        }
-
-        let entry_stale = match self.entry_valid_until {
-            Some(valid_until) => now >= valid_until,
-            None => true,
-        };
-
-        entry_stale
-    }
-}
-
 impl VirtioFsInode {
     fn new(nodeid: u64, metadata: Metadata, fs: Weak<VirtioFs>) -> Arc<Self> {
-        Self::new_with_lookup(nodeid, metadata, fs, LookupState::root())
+        Self::new_with_entry_valid(nodeid, metadata, fs, None)
     }
 
-    fn new_from_lookup(
+    fn new_with_entry_valid(
         nodeid: u64,
         metadata: Metadata,
         fs: Weak<VirtioFs>,
-        lookup_state: LookupState,
-    ) -> Arc<Self> {
-        Self::new_with_lookup(nodeid, metadata, fs, lookup_state)
-    }
-
-    fn new_with_lookup(
-        nodeid: u64,
-        metadata: Metadata,
-        fs: Weak<VirtioFs>,
-        lookup_state: LookupState,
+        entry_valid_until: Option<Duration>,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             this: weak_self.clone(),
             nodeid: AtomicU64::new(nodeid),
             lookup_count: AtomicU64::new(0),
             metadata: RwLock::new(metadata),
+            entry_valid_until: RwLock::new(entry_valid_until),
             attr_valid_until: RwLock::new(None),
-            lookup_state: RwLock::new(lookup_state),
             page_cache: metadata
                 .type_
                 .is_regular_file()
@@ -301,29 +245,21 @@ impl VirtioFsInode {
         let _ = fs.device.fuse_forget(nodeid, nlookup);
     }
 
-    fn revalidate_lookup(&self) -> Result<()> {
+    fn revalidate_lookup(&self, parent_nodeid: u64, name: &str) -> Result<()> {
         let now = MonotonicCoarseClock::get().read_time();
-        let refresh_target = {
-            let lookup_state = self.lookup_state.read();
-            if !lookup_state.is_stale(now) {
-                return Ok(());
-            }
-
-            match (lookup_state.parent_nodeid, lookup_state.name.as_ref()) {
-                (Some(parent_nodeid), Some(name)) => Some((parent_nodeid, name.clone())),
-                _ => None,
-            }
-        };
-
-        let Some((parent_nodeid, name)) = refresh_target else {
+        if self
+            .entry_valid_until
+            .read()
+            .is_some_and(|valid_until| now < valid_until)
+        {
             return Ok(());
-        };
+        }
 
         let old_nodeid = self.nodeid();
         let fs = self.fs_ref();
         let entry_out = fs
             .device
-            .fuse_lookup(parent_nodeid, &name)
+            .fuse_lookup(parent_nodeid, name)
             .map_err(map_virtiofs_error)?;
         self.increase_lookup_count(1);
 
@@ -334,15 +270,10 @@ impl VirtioFsInode {
         *self.metadata.write() = metadata_from_attr(entry_out.attr);
 
         let now = MonotonicCoarseClock::get().read_time();
-        let mut lookup_state = self.lookup_state.write();
-        if lookup_state.parent_nodeid == Some(parent_nodeid)
-            && lookup_state.name.as_deref() == Some(name.as_str())
-        {
-            lookup_state.entry_valid_until = Some(now.saturating_add(valid_duration(
-                entry_out.entry_valid,
-                entry_out.entry_valid_nsec,
-            )));
-        }
+        *self.entry_valid_until.write() = Some(now.saturating_add(valid_duration(
+            entry_out.entry_valid,
+            entry_out.entry_valid_nsec,
+        )));
         *self.attr_valid_until.write() = Some(now.saturating_add(valid_duration(
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
@@ -528,14 +459,7 @@ impl VirtioFsInode {
         Ok(written)
     }
 
-    fn refresh_if_stale_before_open(&self) -> Result<()> {
-        self.revalidate_lookup()?;
-        Ok(())
-    }
-
     fn open_handle(&self, access_mode: AccessMode) -> Result<VirtioFsHandle> {
-        self.refresh_if_stale_before_open()?;
-
         let open_flags = match access_mode {
             AccessMode::O_RDONLY => O_RDONLY,
             AccessMode::O_WRONLY => O_WRONLY,
@@ -848,18 +772,20 @@ impl Inode for VirtioFsInode {
             .map_err(map_virtiofs_error)?;
         let nodeid = entry_out.nodeid;
         let now = MonotonicCoarseClock::get().read_time();
-        let lookup_state =
-            LookupState::from_lookup(parent_nodeid, name.to_string(), now, entry_out);
+        let entry_valid_until = Some(now.saturating_add(valid_duration(
+            entry_out.entry_valid,
+            entry_out.entry_valid_nsec,
+        )));
         let attr_valid_until = Some(now.saturating_add(valid_duration(
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
         )));
 
-        let inode = VirtioFsInode::new_from_lookup(
+        let inode = VirtioFsInode::new_with_entry_valid(
             nodeid,
             metadata_from_attr(entry_out.attr),
             Arc::downgrade(&fs),
-            lookup_state,
+            entry_valid_until,
         );
         *inode.attr_valid_until.write() = attr_valid_until;
         inode.increase_lookup_count(1);
@@ -911,12 +837,7 @@ impl Inode for VirtioFsInode {
             attr_out.attr_valid_nsec,
         )));
 
-        let inode = VirtioFsInode::new_with_lookup(
-            nodeid,
-            metadata_from_attr(attr_out.attr),
-            Arc::downgrade(&fs),
-            LookupState::with_parent_name(parent_nodeid, name.to_string()),
-        );
+        let inode = VirtioFsInode::new(nodeid, metadata_from_attr(attr_out.attr), Arc::downgrade(&fs));
         *inode.attr_valid_until.write() = attr_valid_until;
         inode.increase_lookup_count(1);
 
@@ -990,8 +911,12 @@ impl Inode for VirtioFsInode {
         self.flush_page_cache()
     }
 
-    fn revalidate_dentry(&self) -> Result<()> {
-        self.revalidate_lookup()
+    fn revalidate_child(&self, name: &str, child: &Dentry) -> Result<()> {
+        let Some(parent) = child.parent() else {
+            return Ok(());
+        };
+
+        self.revalidate_lookup(parent.inode().ino(), name)
     }
 
     fn extension(&self) -> &Extension {
