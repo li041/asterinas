@@ -13,7 +13,7 @@ use core::{
 use aster_block::bio::BioWaiter;
 use aster_virtio::device::filesystem::{
     device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-    protocol::{Attr, FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
+    protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
 };
 use ostd::{
     mm::{HasSize, VmReader, VmWriter, io_util::HasVmReaderWriter},
@@ -49,6 +49,7 @@ const S_IFDIR: u32 = 0o040000;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
+const FUSE_READDIR_BUF_SIZE: u32 = 4096;
 
 pub(super) struct VirtioFsType;
 
@@ -95,11 +96,25 @@ pub struct VirtioFs {
 
 impl VirtioFs {
     fn new(device: Arc<FileSystemDevice>, tag: String) -> Result<Arc<Self>> {
-        let root_attr = device.fuse_getattr(FUSE_ROOT_ID).map_err(Error::from)?.attr;
-        let root_metadata = Metadata::from(root_attr);
+        let fuse_attr_out = device.fuse_getattr(FUSE_ROOT_ID).map_err(Error::from)?;
+        let root_metadata = Metadata::from(fuse_attr_out.attr);
+
+        let attr_valid_until = {
+            let now = MonotonicCoarseClock::get().read_time();
+            now.saturating_add(valid_duration(
+                fuse_attr_out.attr_valid,
+                fuse_attr_out.attr_valid_nsec,
+            ))
+        };
 
         Ok(Arc::new_cyclic(|weak_fs| {
-            let root = VirtioFsInode::new(FUSE_ROOT_ID, root_metadata, weak_fs.clone(), None);
+            let root = VirtioFsInode::new(
+                FUSE_ROOT_ID,
+                root_metadata,
+                weak_fs.clone(),
+                None,
+                attr_valid_until,
+            );
 
             Self {
                 sb: SuperBlock::new(VIRTIOFS_MAGIC, BLOCK_SIZE, NAME_MAX),
@@ -145,9 +160,8 @@ struct VirtioFsInode {
     lookup_count: AtomicU64,
     metadata: RwLock<Metadata>,
     entry_valid_until: RwLock<Option<Duration>>,
-    attr_valid_until: RwLock<Option<Duration>>,
-    page_cache: Option<PageCache>,
-    cache_lock: Mutex<()>,
+    attr_valid_until: RwLock<Duration>,
+    page_cache: Option<Mutex<PageCache>>,
     fs: Weak<VirtioFs>,
     extension: Extension,
 }
@@ -165,6 +179,7 @@ impl VirtioFsInode {
         metadata: Metadata,
         fs: Weak<VirtioFs>,
         entry_valid_until: Option<Duration>,
+        attr_valid_until: Duration,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak_self| Self {
             this: weak_self.clone(),
@@ -172,12 +187,10 @@ impl VirtioFsInode {
             lookup_count: AtomicU64::new(0),
             metadata: RwLock::new(metadata),
             entry_valid_until: RwLock::new(entry_valid_until),
-            attr_valid_until: RwLock::new(None),
-            page_cache: metadata
-                .type_
-                .is_regular_file()
-                .then(|| PageCache::with_capacity(metadata.size, weak_self.clone() as _).unwrap()),
-            cache_lock: Mutex::new(()),
+            attr_valid_until: RwLock::new(attr_valid_until),
+            page_cache: metadata.type_.is_regular_file().then(|| {
+                Mutex::new(PageCache::with_capacity(metadata.size, weak_self.clone() as _).unwrap())
+            }),
             fs,
             extension: Extension::new(),
         })
@@ -191,30 +204,18 @@ impl VirtioFsInode {
         self.nodeid.load(Ordering::Relaxed)
     }
 
-    fn increase_lookup_count(&self, count: u64) {
-        if count == 0 {
-            return;
-        }
-
-        self.lookup_count.fetch_add(count, Ordering::Relaxed);
+    fn increase_lookup_count(&self) {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
     }
 
     fn release_lookup_count(&self) {
         let nlookup = self.lookup_count.swap(0, Ordering::Relaxed);
-        if nlookup == 0 {
-            return;
-        }
-
-        let nodeid = self.nodeid();
-        if nodeid == FUSE_ROOT_ID {
-            return;
-        }
 
         let Some(fs) = self.fs.upgrade() else {
             return;
         };
 
-        let _ = fs.device.fuse_forget(nodeid, nlookup);
+        let _ = fs.device.fuse_forget(self.nodeid(), nlookup);
     }
 
     fn revalidate_lookup(&self, parent_nodeid: u64, name: &str) -> Result<()> {
@@ -233,7 +234,7 @@ impl VirtioFsInode {
             .device
             .fuse_lookup(parent_nodeid, name)
             .map_err(Error::from)?;
-        self.increase_lookup_count(1);
+        self.increase_lookup_count();
 
         if entry_out.nodeid != old_nodeid {
             return_errno_with_message!(Errno::ENOENT, "virtiofs stale dentry after revalidate");
@@ -246,32 +247,25 @@ impl VirtioFsInode {
             entry_out.entry_valid,
             entry_out.entry_valid_nsec,
         )));
-        *self.attr_valid_until.write() = Some(now.saturating_add(valid_duration(
+        *self.attr_valid_until.write() = now.saturating_add(valid_duration(
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
-        )));
+        ));
 
         Ok(())
     }
 
     fn refresh_attr_if_needed(&self) -> Result<()> {
         let now = MonotonicCoarseClock::get().read_time();
-        let should_refresh = match *self.attr_valid_until.read() {
-            Some(valid_until) => now >= valid_until,
-            None => true,
-        };
+        let should_refresh = now >= *self.attr_valid_until.read();
 
         if !should_refresh {
             return Ok(());
         }
 
-        let _guard = self.cache_lock.lock();
+        let mut page_cache = self.page_cache.as_ref().map(|page_cache| page_cache.lock());
         let now = MonotonicCoarseClock::get().read_time();
-        if self
-            .attr_valid_until
-            .read()
-            .is_some_and(|valid_until| now < valid_until)
-        {
+        if now < *self.attr_valid_until.read() {
             return Ok(());
         }
 
@@ -281,8 +275,10 @@ impl VirtioFsInode {
 
         let new_metadata = Metadata::from(attr_out.attr);
         if old_metadata.mtime != new_metadata.mtime {
-            self.invalidate_page_cache_locked(new_metadata.size)?;
-        } else if let Some(page_cache) = &self.page_cache
+            if let Some(page_cache) = page_cache.as_mut() {
+                Self::invalidate_page_cache_locked(page_cache, new_metadata.size)?;
+            }
+        } else if let Some(page_cache) = page_cache.as_mut()
             && page_cache.pages().size() != new_metadata.size
         {
             page_cache.resize(new_metadata.size)?;
@@ -290,18 +286,14 @@ impl VirtioFsInode {
 
         *self.metadata.write() = new_metadata;
         let now = MonotonicCoarseClock::get().read_time();
-        *self.attr_valid_until.write() = Some(now.saturating_add(valid_duration(
+        *self.attr_valid_until.write() = now.saturating_add(valid_duration(
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
-        )));
+        ));
         Ok(())
     }
 
-    fn invalidate_page_cache_locked(&self, new_size: usize) -> Result<()> {
-        let Some(page_cache) = &self.page_cache else {
-            return Ok(());
-        };
-
+    fn invalidate_page_cache_locked(page_cache: &mut PageCache, new_size: usize) -> Result<()> {
         let cached_size = page_cache.pages().size();
         if cached_size > 0 {
             page_cache.discard_range(0..cached_size);
@@ -312,8 +304,10 @@ impl VirtioFsInode {
     }
 
     fn invalidate_page_cache(&self, new_size: usize) -> Result<()> {
-        let _guard = self.cache_lock.lock();
-        self.invalidate_page_cache_locked(new_size)
+        let Some(page_cache) = &self.page_cache else {
+            return Ok(());
+        };
+        Self::invalidate_page_cache_locked(&mut page_cache.lock(), new_size)
     }
 
     fn flush_page_cache(&self) -> Result<()> {
@@ -321,13 +315,12 @@ impl VirtioFsInode {
             return Ok(());
         };
 
-        let _guard = self.cache_lock.lock();
-        page_cache.evict_range(0..self.size())?;
+        page_cache.lock().evict_range(0..self.size())?;
         Ok(())
     }
 
     fn mark_attr_stale(&self) {
-        *self.attr_valid_until.write() = None;
+        *self.attr_valid_until.write() = Duration::ZERO;
     }
 
     fn cached_read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
@@ -341,7 +334,7 @@ impl VirtioFsInode {
         let start = file_size.min(offset);
         let end = file_size.min(offset + writer.avail());
         let read_len = end - start;
-        page_cache.pages().read(start, writer)?;
+        page_cache.lock().pages().read(start, writer)?;
         Ok(read_len)
     }
 
@@ -375,21 +368,19 @@ impl VirtioFsInode {
         let Some(page_cache) = &self.page_cache else {
             return self.direct_write_at(offset, reader);
         };
+        let mut page_cache = page_cache.lock();
 
         let write_len = reader.remain();
         let new_size = offset + write_len;
-        {
-            let _guard = self.cache_lock.lock();
-            if new_size > page_cache.pages().size() {
-                page_cache.resize(new_size)?;
-            }
-            {
-                let mut metadata = self.metadata.write();
-                metadata.size = metadata.size.max(new_size);
-                metadata.blocks = metadata.size.div_ceil(metadata.blk_size.max(1));
-            }
-            page_cache.pages().write(offset, reader)?;
+        if new_size > page_cache.pages().size() {
+            page_cache.resize(new_size)?;
         }
+        {
+            let mut metadata = self.metadata.write();
+            metadata.size = metadata.size.max(new_size);
+            metadata.blocks = metadata.size.div_ceil(metadata.blk_size.max(1));
+        }
+        page_cache.pages().write(offset, reader)?;
 
         self.mark_attr_stale();
         Ok(write_len)
@@ -421,9 +412,7 @@ impl VirtioFsInode {
             metadata.blocks = metadata.size.div_ceil(metadata.blk_size.max(1));
         }
 
-        if self.page_cache.is_some() {
-            self.invalidate_page_cache(self.size())?;
-        }
+        self.invalidate_page_cache(self.size())?;
         self.mark_attr_stale();
         Ok(written)
     }
@@ -635,9 +624,8 @@ impl Inode for VirtioFsInode {
 
         let new_metadata = Metadata::from(attr_out.attr);
         {
-            let _guard = self.cache_lock.lock();
             if let Some(page_cache) = &self.page_cache {
-                page_cache.resize(new_metadata.size)?;
+                page_cache.lock().resize(new_metadata.size)?;
             }
             *self.metadata.write() = new_metadata;
         }
@@ -710,7 +698,7 @@ impl Inode for VirtioFsInode {
     fn page_cache(&self) -> Option<Arc<Vmo>> {
         self.page_cache
             .as_ref()
-            .map(|page_cache| page_cache.pages().clone())
+            .map(|page_cache| page_cache.lock().pages().clone())
     }
 
     fn open(
@@ -740,24 +728,27 @@ impl Inode for VirtioFsInode {
             .fuse_lookup(parent_nodeid, name)
             .map_err(Error::from)?;
         let nodeid = entry_out.nodeid;
+
         let now = MonotonicCoarseClock::get().read_time();
+
         let entry_valid_until = Some(now.saturating_add(valid_duration(
             entry_out.entry_valid,
             entry_out.entry_valid_nsec,
         )));
-        let attr_valid_until = Some(now.saturating_add(valid_duration(
+        let attr_valid_until = now.saturating_add(valid_duration(
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
-        )));
+        ));
 
         let inode = VirtioFsInode::new(
             nodeid,
             Metadata::from(entry_out.attr),
             Arc::downgrade(&fs),
             entry_valid_until,
+            attr_valid_until,
         );
-        *inode.attr_valid_until.write() = attr_valid_until;
-        inode.increase_lookup_count(1);
+        inode.increase_lookup_count();
+
         Ok(inode)
     }
 
@@ -769,7 +760,7 @@ impl Inode for VirtioFsInode {
 
         let fs = self.fs_ref();
         let parent_nodeid = self.nodeid();
-        let (entry_out, opened_open_out) = match type_ {
+        let (entry_out, open_out_opt) = match type_ {
             InodeType::File => {
                 let (entry_out, open_out) = fs
                     .device
@@ -796,7 +787,7 @@ impl Inode for VirtioFsInode {
             .fuse_getattr(entry_out.nodeid)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs getattr after create failed"))?;
 
-        if let Some(open_out) = opened_open_out {
+        if let Some(open_out) = open_out_opt {
             let _ = fs
                 .device
                 .fuse_release(entry_out.nodeid, open_out.fh, O_RDWR);
@@ -808,19 +799,19 @@ impl Inode for VirtioFsInode {
             entry_out.entry_valid,
             entry_out.entry_valid_nsec,
         )));
-        let attr_valid_until = Some(now.saturating_add(valid_duration(
+        let attr_valid_until = now.saturating_add(valid_duration(
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
-        )));
+        ));
 
         let inode = VirtioFsInode::new(
             entry_out.nodeid,
             Metadata::from(attr_out.attr),
             Arc::downgrade(&fs),
             entry_valid_until,
+            attr_valid_until,
         );
-        *inode.attr_valid_until.write() = attr_valid_until;
-        inode.increase_lookup_count(1);
+        inode.increase_lookup_count();
 
         Ok(inode)
     }
@@ -850,8 +841,6 @@ impl Inode for VirtioFsInode {
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
-        // lxh debug
-        const FUSE_READDIR_BUF_SIZE: u32 = 4096;
         let metadata = self.metadata();
         if metadata.type_ != InodeType::Dir {
             return_errno_with_message!(Errno::ENOTDIR, "readdir on non-directory")
@@ -884,12 +873,12 @@ impl Inode for VirtioFsInode {
         Ok(current_off)
     }
 
-    fn fs(&self) -> Arc<dyn FileSystem> {
-        self.fs_ref()
-    }
-
     fn sync_data(&self) -> Result<()> {
         self.flush_page_cache()
+    }
+
+    fn fs(&self) -> Arc<dyn FileSystem> {
+        self.fs_ref()
     }
 
     fn revalidate_child(&self, name: &str, child: &Dentry) -> Result<()> {
@@ -915,27 +904,6 @@ fn inode_type_from_dirent_type(type_: u32) -> InodeType {
         1 => InodeType::NamedPipe,
         12 => InodeType::Socket,
         _ => InodeType::Unknown,
-    }
-}
-
-impl From<Attr> for Metadata {
-    fn from(attr: Attr) -> Self {
-        Metadata {
-            dev: 0,
-            ino: attr.ino,
-            size: attr.size as usize,
-            blk_size: attr.blksize as usize,
-            blocks: attr.blocks as usize,
-            atime: Duration::new(attr.atime, attr.atimensec),
-            mtime: Duration::new(attr.mtime, attr.mtimensec),
-            ctime: Duration::new(attr.ctime, attr.ctimensec),
-            type_: InodeType::from_raw_mode(attr.mode as u16).unwrap_or(InodeType::Unknown),
-            mode: InodeMode::from_bits_truncate(attr.mode as u16),
-            nlinks: attr.nlink as usize,
-            uid: Uid::new(attr.uid),
-            gid: Gid::new(attr.gid),
-            rdev: attr.rdev as u64,
-        }
     }
 }
 

@@ -5,6 +5,7 @@
 use alloc::boxed::ThinBox;
 use core::time::Duration;
 
+use aster_virtio::device::filesystem::protocol::Attr;
 use core2::io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult, Write};
 use ostd::task::Task;
 use spin::Once;
@@ -140,6 +141,27 @@ pub struct Metadata {
     pub uid: Uid,
     pub gid: Gid,
     pub rdev: u64,
+}
+
+impl From<Attr> for Metadata {
+    fn from(attr: Attr) -> Self {
+        Metadata {
+            dev: 0,
+            ino: attr.ino,
+            size: attr.size as usize,
+            blk_size: attr.blksize as usize,
+            blocks: attr.blocks as usize,
+            atime: Duration::new(attr.atime, attr.atimensec),
+            mtime: Duration::new(attr.mtime, attr.mtimensec),
+            ctime: Duration::new(attr.ctime, attr.ctimensec),
+            type_: InodeType::from_raw_mode(attr.mode as u16).unwrap_or(InodeType::Unknown),
+            mode: InodeMode::from_bits_truncate(attr.mode as u16),
+            nlinks: attr.nlink as usize,
+            uid: Uid::new(attr.uid),
+            gid: Gid::new(attr.gid),
+            rdev: attr.rdev as u64,
+        }
+    }
 }
 
 impl Metadata {
