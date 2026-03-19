@@ -11,12 +11,9 @@ use core::{
 };
 
 use aster_block::bio::BioWaiter;
-use aster_virtio::device::{
-    filesystem::{
-        device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-        protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
-    },
-    socket::error,
+use aster_virtio::device::filesystem::{
+    device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
+    protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
 };
 use ostd::{
     mm::{HasSize, VmReader, VmWriter, io_util::HasVmReaderWriter},
