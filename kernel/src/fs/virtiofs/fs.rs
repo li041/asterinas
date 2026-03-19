@@ -29,7 +29,7 @@ use crate::{
         utils::{
             AccessMode, CachePage, DirentVisitor, Extension, FileSystem, FsEventSubscriberStats,
             FsFlags, Inode, InodeIo, InodeMode, InodeType, Metadata, PageCache, PageCacheBackend,
-            StatusFlags, SuperBlock,
+            StatusFlags, SuperBlock, SymbolicLink,
         },
     },
     prelude::*,
@@ -826,6 +826,23 @@ impl Inode for VirtioFsInode {
         Ok(inode)
     }
 
+    fn link(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
+        let metadata = self.metadata();
+        if metadata.type_ != InodeType::Dir {
+            return_errno_with_message!(Errno::ENOTDIR, "link on non-directory")
+        }
+
+        let old = old
+            .downcast_ref::<VirtioFsInode>()
+            .ok_or_else(|| Error::with_message(Errno::EXDEV, "not same fs"))?;
+
+        let fs = self.fs_ref();
+        fs.device
+            .fuse_link(old.nodeid(), self.nodeid(), name)
+            .map_err(Error::from)?;
+        Ok(())
+    }
+
     fn unlink(&self, name: &str) -> Result<()> {
         let metadata = self.metadata();
         if metadata.type_ != InodeType::Dir {
@@ -889,6 +906,21 @@ impl Inode for VirtioFsInode {
 
     fn fs(&self) -> Arc<dyn FileSystem> {
         self.fs_ref()
+    }
+
+    fn read_link(&self) -> Result<SymbolicLink> {
+        let metadata = self.metadata();
+        if metadata.type_ != InodeType::SymLink {
+            return_errno_with_message!(Errno::EINVAL, "read_link on non-symlink")
+        }
+
+        let fs = self.fs_ref();
+        let target = fs
+            .device
+            .fuse_readlink(self.nodeid())
+            .map_err(Error::from)?;
+
+        Ok(SymbolicLink::Plain(target))
     }
 
     fn revalidate_child(&self, name: &str, child: &Dentry) -> Result<()> {

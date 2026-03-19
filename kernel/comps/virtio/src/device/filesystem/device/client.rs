@@ -426,6 +426,86 @@ impl FileSystemDevice {
         Ok(())
     }
 
+    pub fn fuse_readlink(&self, nodeid: u64) -> Result<String, VirtioDeviceError> {
+        const MAX_READLINK_SIZE: usize = 4096;
+        let unique = self.alloc_unique();
+
+        let in_header = InHeader::new(
+            size_of::<InHeader>() as u32,
+            FUSE_OPCODE_READLINK,
+            unique,
+            nodeid,
+        );
+
+        let in_header_slice = self.prepare_in_header_buf(in_header);
+        let out_header_slice = self.prepare_out_header_buf();
+        let out_payload_slice = self.prepare_out_payload_buf(MAX_READLINK_SIZE);
+
+        let selector = self.select_request_queue(nodeid);
+        self.submit_request_and_wait(
+            selector,
+            unique,
+            &[&in_header_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
+
+        let out_header = self.check_reply(&out_header_slice, unique, false)?;
+        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
+            .unwrap();
+
+        let mut payload = vec![0u8; payload_len];
+        let mut reader = out_payload_slice.reader().unwrap();
+        reader.limit(payload_len);
+        reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+
+        // Fuse readlink may include a trailing '\0'.
+        let end = payload.iter().position(|b| *b == 0).unwrap_or(payload_len);
+        let target = String::from_utf8_lossy(&payload[..end]).to_string();
+
+        Ok(target)
+    }
+
+    pub fn fuse_link(
+        &self,
+        old_nodeid: u64,
+        new_parent_nodeid: u64,
+        new_name: &str,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        let unique = self.alloc_unique();
+
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + size_of::<LinkIn>() + new_name.len() + 1) as u32,
+            FUSE_OPCODE_LINK,
+            unique,
+            new_parent_nodeid,
+        );
+        let link_in = LinkIn::new(old_nodeid);
+
+        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+            self.prepare_request_slices(in_header, link_in, size_of::<EntryOut>());
+        let in_name_slice = self.prepare_in_name_buf(new_name);
+
+        let selector = self.select_request_queue(new_parent_nodeid);
+        self.submit_request_and_wait(
+            selector,
+            unique,
+            &[&in_header_slice, &in_payload_slice, &in_name_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
+
+        self.check_reply(&out_header_slice, unique, true)?;
+
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
+            .unwrap();
+
+        Ok(out_payload_slice.read_val(0).unwrap())
+    }
+
     pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<OpenOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
