@@ -31,6 +31,12 @@ ENABLE_BASIC_TEST ?= false
 # Note that currently the virtual terminal (tty0) can only work with
 # linux-efi-handover64 and linux-efi-pe64 boot protocol.
 CONSOLE ?= hvc0
+# Root filesystem type: ramfs (initramfs) or virtiofs
+# - ramfs: Use initramfs (default, existing behavior)
+# - virtiofs: Use virtiofs as the root filesystem
+ROOTFS ?= ramfs
+VIRTIOFS_TAG ?= myfs
+VIRTIOFS_SHARED_DIR ?= /tmp/shared_dir
 # End of global build options.
 
 # GDB debugging and profiling options.
@@ -186,10 +192,22 @@ ifeq ($(ENABLE_KVM), 1)
 	endif
 endif
 
-# Skip GZIP to make encoding and decoding of initramfs faster
-ifeq ($(INITRAMFS_SKIP_GZIP),1)
-CARGO_OSDK_INITRAMFS_OPTION := --initramfs=$(abspath test/initramfs/build/initramfs.cpio)
-CARGO_OSDK_COMMON_ARGS += $(CARGO_OSDK_INITRAMFS_OPTION)
+# Handle ROOTFS type: ramfs (initramfs) or virtiofs
+ifeq ($(ROOTFS),virtiofs)
+	# For virtiofs: keep the normal boot flow and only switch rootfs source.
+	CARGO_OSDK_BUILD_ARGS += --kcmd-args="rootfs=virtiofs"
+	CARGO_OSDK_BUILD_ARGS += --kcmd-args="virtiofs_tag=$(VIRTIOFS_TAG)"
+	# Skip initramfs for virtiofs mode
+	CARGO_OSDK_INITRAMFS_OPTION :=
+else
+	# For ramfs: use initramfs (existing behavior)
+	# Skip GZIP to make encoding and decoding of initramfs faster
+	ifeq ($(INITRAMFS_SKIP_GZIP),1)
+	CARGO_OSDK_INITRAMFS_OPTION := --initramfs=$(abspath test/initramfs/build/initramfs.cpio)
+	else
+	CARGO_OSDK_INITRAMFS_OPTION := --initramfs=$(abspath test/initramfs/build/initramfs.cpio.gz)
+	endif
+	CARGO_OSDK_COMMON_ARGS += $(CARGO_OSDK_INITRAMFS_OPTION)
 endif
 
 CARGO_OSDK_BUILD_ARGS += $(CARGO_OSDK_COMMON_ARGS)
@@ -298,14 +316,29 @@ check_vdso:
 initramfs: check_vdso
 	@$(MAKE) --no-print-directory -C test/initramfs
 
-# Build the kernel with an initramfs
+.PHONY: rootfs_image
+rootfs_image:
+ifeq ($(ROOTFS),virtiofs)
+	@$(MAKE) --no-print-directory initramfs
+	@mkdir -p $(VIRTIOFS_SHARED_DIR)
+	@find $(VIRTIOFS_SHARED_DIR) -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+	@command -v cpio >/dev/null || (echo "Error: cpio is required for ROOTFS=virtiofs" && exit 1)
+	@gzip -dc test/initramfs/build/initramfs.cpio.gz | (cd $(VIRTIOFS_SHARED_DIR) && cpio -idmu --quiet)
+	@echo "Prepared virtiofs rootfs in $(VIRTIOFS_SHARED_DIR) (from initramfs.cpio.gz)"
+else
+	@$(MAKE) --no-print-directory initramfs
+endif
+
+# Build the kernel
 .PHONY: kernel
-kernel: initramfs $(CARGO_OSDK)
+kernel: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk build $(CARGO_OSDK_BUILD_ARGS)
 
-# Build the kernel with an initramfs and then run it
+# Build the kernel and then run it
 .PHONY: run_kernel
-run_kernel: initramfs $(CARGO_OSDK)
+run_kernel: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk run $(CARGO_OSDK_BUILD_ARGS)
 # Check the running status of auto tests from the QEMU log
 ifeq ($(AUTO_TEST), syscall)
@@ -375,19 +408,23 @@ else
 endif
 
 .PHONY: gdb_server
-gdb_server: initramfs $(CARGO_OSDK)
+gdb_server: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk run $(CARGO_OSDK_BUILD_ARGS) --gdb-server wait-client,vscode,addr=:$(GDB_TCP_PORT)
 
 .PHONY: gdb_client
-gdb_client: initramfs $(CARGO_OSDK)
+gdb_client: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk debug $(CARGO_OSDK_BUILD_ARGS) --remote :$(GDB_TCP_PORT)
 
 .PHONY: profile_server
-profile_server: initramfs $(CARGO_OSDK)
+profile_server: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk run $(CARGO_OSDK_BUILD_ARGS) --gdb-server addr=:$(GDB_TCP_PORT)
 
 .PHONY: profile_client
-profile_client: initramfs $(CARGO_OSDK)
+profile_client: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@cd kernel && cargo osdk profile $(CARGO_OSDK_BUILD_ARGS) --remote :$(GDB_TCP_PORT) \
 		--samples $(GDB_PROFILE_COUNT) --interval $(GDB_PROFILE_INTERVAL) --format $(GDB_PROFILE_FORMAT)
 
@@ -398,7 +435,8 @@ test:
 	done
 
 .PHONY: ktest
-ktest: initramfs $(CARGO_OSDK)
+ktest: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@# Notes:
 	@# 1. linux-bzimage-setup is excluded from ktest since it's hard to be unit tested;
 	@# 2. Artifacts are removed after testing each crate to save the limited disk space
@@ -440,7 +478,8 @@ format:
 	@$(MAKE) --no-print-directory -C test/nixos format
 
 .PHONY: check
-check: initramfs $(CARGO_OSDK)
+check: $(CARGO_OSDK)
+	@$(MAKE) --no-print-directory rootfs_image
 	@# Check formatting issues of the Rust code
 	@./tools/format_all.sh --check
 	@

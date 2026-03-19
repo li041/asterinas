@@ -26,8 +26,27 @@ impl Read for BoxedReader<'_> {
     }
 }
 
-/// Unpack and prepare the rootfs from the initramfs CPIO buffer.
+/// Initialize the root filesystem.
+///
+/// This function handles two modes:
+/// - ramfs (default): Unpack initramfs to ramfs
+/// - virtiofs: Already handled by MountNamespace::get_init_singleton()
+///
+/// Note: When rootfs=virtiofs is specified in the kernel command line,
+/// the mount namespace is created with virtiofs as root in get_init_singleton().
+/// In that case, this function just returns early without unpacking initramfs.
 pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
+    // Check if we should use virtiofs as root filesystem
+    // If so, the mount namespace is already created with virtiofs in get_init_singleton()
+    let cmdline = boot_info().kernel_cmdline.as_str();
+    let is_virtiofs_mode = cmdline.contains("rootfs=virtiofs");
+
+    if is_virtiofs_mode {
+        println!("[kernel] using virtiofs as root filesystem");
+        return Ok(());
+    }
+
+    // Default: use initramfs (ramfs mode)
     let initramfs_buf = boot_info().initramfs.expect("No initramfs found!");
 
     let reader = {

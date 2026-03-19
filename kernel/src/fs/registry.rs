@@ -100,7 +100,7 @@ pub fn init() {
 
 static FS_REGISTRY: Once<Arc<FsRegistry>> = Once::new();
 
-struct FsRegistry {
+pub struct FsRegistry {
     fs_table: Mutex<BTreeMap<&'static str, &'static dyn FsType>>,
     systree_fields: AttrLessBranchNodeFields<dyn SysObj, Self>,
 }
@@ -140,6 +140,7 @@ impl FsRegistry {
         fs_table.insert(new_type.name(), new_type);
         Ok(())
     }
+
 }
 
 inherit_sys_branch_node!(FsRegistry, systree_fields, {

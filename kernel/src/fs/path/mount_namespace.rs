@@ -1,15 +1,41 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use ostd::boot::boot_info;
 use spin::Once;
 
 use crate::{
     fs::{
         path::{Mount, Path, PathResolver},
         ramfs::RamFs,
+        registry,
+        utils::FsFlags,
     },
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread},
 };
+
+/// Parses the kernel command line to check if rootfs=virtiofs is specified.
+///
+/// Returns Some(virtiofs_tag) if virtiofs mode is enabled, None otherwise.
+fn get_virtiofs_tag_from_cmdline() -> Option<String> {
+    let cmdline = boot_info().kernel_cmdline.as_str();
+
+    for arg in cmdline.split_whitespace() {
+        if let Some(value) = arg.strip_prefix("rootfs=") {
+            if value == "virtiofs" {
+                // Check for virtiofs_tag
+                for tag_arg in cmdline.split_whitespace() {
+                    if let Some(tag) = tag_arg.strip_prefix("virtiofs_tag=") {
+                        return Some(tag.to_string());
+                    }
+                }
+                // Default tag if not specified
+                return Some("share_folder".to_string());
+            }
+        }
+    }
+    None
+}
 
 /// Represents a mount namespace, which encapsulates a mount tree and provides
 /// isolation for filesystem views between different threads.
@@ -26,11 +52,25 @@ pub struct MountNamespace {
 
 impl MountNamespace {
     /// Returns a reference to the singleton initial mount namespace.
+    ///
+    /// If rootfs=virtiofs is specified in the kernel command line,
+    /// the mount namespace will use virtiofs as the root filesystem.
+    /// Otherwise, it will use ramfs (default behavior).
     #[doc(hidden)]
     pub fn get_init_singleton() -> &'static Arc<MountNamespace> {
         static INIT: Once<Arc<MountNamespace>> = Once::new();
 
         INIT.call_once(|| {
+            // Check if we should use virtiofs as root filesystem
+            if let Some(virtiofs_tag) = get_virtiofs_tag_from_cmdline() {
+                println!(
+                    "[kernel] creating mount namespace with virtiofs as root (tag: {}) ...",
+                    virtiofs_tag
+                );
+                return MountNamespace::new_with_virtiofs_root(&virtiofs_tag).unwrap();
+            }
+
+            // Default: use ramfs
             let owner = UserNamespace::get_init_singleton().clone();
             let rootfs = RamFs::new();
 
@@ -39,6 +79,24 @@ impl MountNamespace {
                 MountNamespace { root, owner }
             })
         })
+    }
+
+    /// Creates a new mount namespace with virtiofs as the root filesystem.
+    ///
+    /// This is used when rootfs=virtiofs is specified in the kernel command line.
+    #[doc(hidden)]
+    pub fn new_with_virtiofs_root(virtiofs_tag: &str) -> Result<Arc<MountNamespace>> {
+        let owner = UserNamespace::get_init_singleton().clone();
+        let tag_cstring = CString::new(virtiofs_tag)
+            .map_err(|_| Error::with_message(Errno::EINVAL, "invalid virtiofs tag"))?;
+        let fs = registry::look_up("virtiofs")
+            .ok_or_else(|| Error::with_message(Errno::ENODEV, "virtiofs not registered"))?
+            .create(FsFlags::empty(), Some(tag_cstring), None)?;
+
+        Ok(Arc::new_cyclic(|weak_self| {
+            let root = Mount::new_root(fs, weak_self.clone());
+            MountNamespace { root, owner }
+        }))
     }
 
     /// Gets the root mount of this namespace.
