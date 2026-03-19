@@ -26,8 +26,20 @@ impl Read for BoxedReader<'_> {
     }
 }
 
-/// Unpack and prepare the rootfs from the initramfs CPIO buffer.
+/// Unpack and prepare the rootfs from the initramfs CPIO buffer if needed.
 pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
+    let cmdline = boot_info().kernel_cmdline.as_str();
+
+    let is_ramfs_root = cmdline.contains("rootfs=ramfs");
+    println!(
+        "[kernel] rootfs=ramfs is {}specified in the kernel command line",
+        if is_ramfs_root { "" } else { "not " }
+    );
+    println!("kernel_cmdline = {}", cmdline);
+    if !is_ramfs_root {
+        return Ok(());
+    }
+
     let initramfs_buf = boot_info().initramfs.expect("No initramfs found!");
 
     let reader = {

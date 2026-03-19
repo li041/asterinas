@@ -5,7 +5,9 @@ use spin::Once;
 use crate::{
     fs::{
         path::{Mount, Path, PathResolver},
-        ramfs::RamFs,
+        registry,
+        utils::FsFlags,
+        virtiofs::get_virtiofs_tag_from_cmdline,
     },
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread},
@@ -26,13 +28,34 @@ pub struct MountNamespace {
 
 impl MountNamespace {
     /// Returns a reference to the singleton initial mount namespace.
+    ///
+    /// If `rootfs=virtiofs` is specified in the kernel command line,
+    /// the mount namespace will use virtiofs as the root filesystem.
+    /// Otherwise, it will use ramfs (default behavior).
     #[doc(hidden)]
     pub fn get_init_singleton() -> &'static Arc<MountNamespace> {
         static INIT: Once<Arc<MountNamespace>> = Once::new();
 
+        let owner = UserNamespace::get_init_singleton().clone();
+
         INIT.call_once(|| {
-            let owner = UserNamespace::get_init_singleton().clone();
-            let rootfs = RamFs::new();
+            // Check if we should use virtiofs as root filesystem
+            let (fs_type, args) = if let Some(virtiofs_tag) = get_virtiofs_tag_from_cmdline() {
+                println!(
+                    "[kernel] creating mount namespace with virtiofs as root (tag: {}) ...",
+                    virtiofs_tag
+                );
+
+                let tag = CString::new(virtiofs_tag).unwrap();
+                let fs_type = registry::look_up("virtiofs").unwrap();
+                (fs_type, Some(tag))
+            } else {
+                println!("[kernel] creating mount namespace with ramfs as root ...");
+                let fs_type = registry::look_up("ramfs").unwrap();
+                (fs_type, None)
+            };
+
+            let rootfs = fs_type.create(FsFlags::empty(), args, None).unwrap();
 
             Arc::new_cyclic(|weak_self| {
                 let root = Mount::new_root(rootfs, weak_self.clone());
