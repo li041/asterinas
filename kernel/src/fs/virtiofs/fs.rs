@@ -162,6 +162,7 @@ struct VirtioFsInode {
     entry_valid_until: RwLock<Option<Duration>>,
     attr_valid_until: RwLock<Duration>,
     page_cache: Option<Mutex<PageCache>>,
+    page_cache_fh: Mutex<Option<u64>>,
     fs: Weak<VirtioFs>,
     extension: Extension,
 }
@@ -191,6 +192,7 @@ impl VirtioFsInode {
             page_cache: metadata.type_.is_regular_file().then(|| {
                 Mutex::new(PageCache::with_capacity(metadata.size, weak_self.clone() as _).unwrap())
             }),
+            page_cache_fh: Mutex::new(None),
             fs,
             extension: Extension::new(),
         })
@@ -216,6 +218,31 @@ impl VirtioFsInode {
         };
 
         let _ = fs.device.fuse_forget(self.nodeid(), nlookup);
+    }
+
+    fn get_or_open_page_cache_fh(&self) -> Result<u64> {
+        let mut fh_slot = self.page_cache_fh.lock();
+        if let Some(fh) = *fh_slot {
+            return Ok(fh);
+        }
+
+        let fs = self.fs_ref();
+        let open_out = fs
+            .device
+            .fuse_open(self.nodeid(), O_RDWR)
+            .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page cache open failed"))?;
+        *fh_slot = Some(open_out.fh);
+        Ok(open_out.fh)
+    }
+
+    fn release_page_cache_fh(&self) {
+        let Some(fs) = self.fs.upgrade() else {
+            return;
+        };
+
+        if let Some(fh) = self.page_cache_fh.lock().take() {
+            let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDWR);
+        }
     }
 
     fn revalidate_lookup(&self, parent_nodeid: u64, name: &str) -> Result<()> {
@@ -434,6 +461,7 @@ impl VirtioFsInode {
 
 impl Drop for VirtioFsInode {
     fn drop(&mut self) {
+        self.release_page_cache_fh();
         self.release_lookup_count();
     }
 }
@@ -448,15 +476,10 @@ impl PageCacheBackend for VirtioFsInode {
         frame.writer().fill_zeros(frame.size());
         let size = (self.size() - offset).min(PAGE_SIZE).min(u32::MAX as usize) as u32;
         let fs = self.fs_ref();
+        let fh = self.get_or_open_page_cache_fh()?;
         let data = fs
             .device
-            .fuse_open(self.nodeid(), O_RDONLY)
-            .and_then(|fh_out| {
-                let fh = fh_out.fh;
-                let result = fs.device.fuse_read(self.nodeid(), fh, offset as u64, size);
-                let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDONLY);
-                result
-            })
+            .fuse_read(self.nodeid(), fh, offset as u64, size)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page read failed"))?;
         let mut frame_writer = frame.writer();
         frame_writer.write_fallible(&mut VmReader::from(data.as_slice()).to_fallible())?;
@@ -476,16 +499,9 @@ impl PageCacheBackend for VirtioFsInode {
         writer.write_fallible(&mut frame.reader().to_fallible())?;
 
         let fs = self.fs_ref();
+        let fh = self.get_or_open_page_cache_fh()?;
         fs.device
-            .fuse_open(self.nodeid(), O_WRONLY)
-            .and_then(|fh_out| {
-                let fh = fh_out.fh;
-                let result = fs
-                    .device
-                    .fuse_write(self.nodeid(), fh, offset as u64, &data);
-                let _ = fs.device.fuse_release(self.nodeid(), fh, O_WRONLY);
-                result
-            })
+            .fuse_write(self.nodeid(), fh, offset as u64, &data)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page write failed"))?;
         Ok(BioWaiter::new())
     }
