@@ -28,7 +28,15 @@ impl Read for BoxedReader<'_> {
 
 /// Unpack and prepare the rootfs from the initramfs CPIO buffer.
 pub fn init_in_first_kthread(path_resolver: &PathResolver) -> Result<()> {
-    let initramfs_buf = boot_info().initramfs.expect("No initramfs found!");
+    if path_resolver.root().mount_node().fs().name() != "ramfs" {
+        println!("[kernel] skip initramfs unpacking: non-ramfs root is already selected");
+        println!("[kernel] rootfs is ready");
+        return Ok(());
+    }
+
+    let Some(initramfs_buf) = boot_info().initramfs else {
+        return_errno_with_message!(Errno::EINVAL, "no initramfs found for ramfs boot");
+    };
 
     let reader = {
         let mut initramfs_suffix = "";

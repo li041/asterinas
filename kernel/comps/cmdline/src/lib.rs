@@ -39,12 +39,20 @@ pub enum ModuleArg {
     KeyVal(CString, CString),
 }
 
+/// The root filesystem selection parsed from kernel command line.
+#[derive(PartialEq, Debug, Clone)]
+pub enum RootFs {
+    RamFs,
+    VirtioFs { tag: String },
+}
+
 /// The struct to store the parsed kernel command-line arguments.
 #[derive(Debug)]
 pub struct KCmdlineArg {
     initproc: InitprocArgs,
     console_names: Vec<String>,
     module_args: BTreeMap<String, Vec<ModuleArg>>,
+    rootfs: RootFs,
 }
 
 // Define get APIs.
@@ -72,6 +80,39 @@ impl KCmdlineArg {
     /// Gets the argument vector of a kernel module.
     pub fn get_module_args(&self, module: &str) -> Option<&Vec<ModuleArg>> {
         self.module_args.get(module)
+    }
+
+    /// Gets the configured root filesystem.
+    pub fn get_rootfs(&self) -> &RootFs {
+        &self.rootfs
+    }
+}
+
+fn parse_rootfs(value: &str) -> Option<RootFs> {
+    let mut segments = value.split(',');
+    let fs_type = segments.next()?.trim();
+
+    match fs_type {
+        "ramfs" => Some(RootFs::RamFs),
+        "virtiofs" => {
+            let mut tag = None;
+            for segment in segments {
+                let Some((key, val)) = segment.split_once('=') else {
+                    continue;
+                };
+                if key.trim() == "tag" {
+                    let trimmed = val.trim();
+                    if !trimmed.is_empty() {
+                        tag = Some(trimmed.to_string());
+                    }
+                }
+            }
+
+            Some(RootFs::VirtioFs {
+                tag: tag.unwrap_or_else(|| "myfs".to_string()),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -101,6 +142,7 @@ impl From<&str> for KCmdlineArg {
             },
             console_names: Vec::new(),
             module_args: BTreeMap::new(),
+            rootfs: RootFs::RamFs,
         };
 
         // Every thing after the "--" mark is the init arguments.
@@ -178,6 +220,16 @@ impl From<&str> for KCmdlineArg {
                     }
                     "console" => {
                         result.console_names.push(value.to_string());
+                    }
+                    "rootfs" => {
+                        if let Some(rootfs) = parse_rootfs(value) {
+                            result.rootfs = rootfs;
+                        } else {
+                            log::warn!(
+                                "[KCmdline] Unsupported rootfs argument {}, fallback to ramfs",
+                                value
+                            );
+                        }
                     }
                     _ => {
                         // If the option is not recognized, it is passed to the init process.

@@ -48,6 +48,12 @@ EXTRA_BLOCKLISTS_DIRS ?= ""
 SYSCALL_TEST_WORKDIR ?= /tmp
 # End of auto test features.
 
+# Rootfs selection settings
+# ROOTFS_TYPE possible values are ramfs,virtiofs
+ROOTFS_TYPE ?= ramfs
+ROOTFS_VIRTIOFS_TAG ?= myfs
+# End of rootfs selection settings
+
 # Network settings
 # NETDEV possible values are user,tap
 NETDEV ?= user
@@ -90,6 +96,17 @@ CARGO_OSDK_COMMON_ARGS := --target-arch=$(OSDK_TARGET_ARCH)
 CARGO_OSDK_BUILD_ARGS := --kcmd-args="ostd.log_level=$(LOG_LEVEL)"
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="console=$(CONSOLE)"
 CARGO_OSDK_TEST_ARGS :=
+
+ifeq ($(ROOTFS_TYPE),virtiofs)
+CARGO_OSDK_ROOTFS_KCMD_ARG := --kcmd-args="rootfs=virtiofs,tag=$(ROOTFS_VIRTIOFS_TAG)"
+else ifeq ($(ROOTFS_TYPE),ramfs)
+CARGO_OSDK_ROOTFS_KCMD_ARG := --kcmd-args="rootfs=ramfs"
+else
+$(error ROOTFS_TYPE must be either 'ramfs' or 'virtiofs')
+endif
+
+CARGO_OSDK_BUILD_ARGS += $(CARGO_OSDK_ROOTFS_KCMD_ARG)
+CARGO_OSDK_TEST_ARGS += $(CARGO_OSDK_ROOTFS_KCMD_ARG)
 
 ifeq ($(AUTO_TEST), syscall)
 BUILD_SYSCALL_TEST := 1

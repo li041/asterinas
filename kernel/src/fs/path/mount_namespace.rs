@@ -1,15 +1,53 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::ffi::CString;
+
+use aster_cmdline::{KCmdlineArg, RootFs};
+use ostd::boot::boot_info;
 use spin::Once;
 
 use crate::{
     fs::{
         path::{Mount, Path, PathResolver},
         ramfs::RamFs,
+        registry,
+        utils::{FileSystem, FsFlags},
     },
     prelude::*,
     process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::PosixThread},
 };
+
+fn create_boot_rootfs() -> Arc<dyn FileSystem> {
+    // Parse the raw boot cmdline here to avoid depending on component init order.
+    let kcmdline = KCmdlineArg::from(boot_info().kernel_cmdline.as_str());
+
+    match kcmdline.get_rootfs() {
+        RootFs::RamFs => {
+            println!("[kernel] boot rootfs selected: ramfs");
+            RamFs::new() as Arc<dyn FileSystem>
+        }
+        RootFs::VirtioFs { tag } => {
+            let rootfs = registry::look_up("virtiofs")
+                .and_then(|fs_type| {
+                    fs_type
+                        .create(FsFlags::empty(), CString::new(tag.as_str()).ok(), None)
+                        .ok()
+                })
+                .unwrap_or_else(|| {
+                    println!(
+                        "[kernel] boot rootfs virtiofs(tag={}) unavailable, fallback to ramfs",
+                        tag
+                    );
+                    RamFs::new() as Arc<dyn FileSystem>
+                });
+
+            if rootfs.name() == "virtiofs" {
+                println!("[kernel] boot rootfs selected: virtiofs(tag={})", tag);
+            }
+            rootfs
+        }
+    }
+}
 
 /// Represents a mount namespace, which encapsulates a mount tree and provides
 /// isolation for filesystem views between different threads.
@@ -32,7 +70,7 @@ impl MountNamespace {
 
         INIT.call_once(|| {
             let owner = UserNamespace::get_init_singleton().clone();
-            let rootfs = RamFs::new();
+            let rootfs = create_boot_rootfs();
 
             Arc::new_cyclic(|weak_self| {
                 let root = Mount::new_root(rootfs, weak_self.clone());
