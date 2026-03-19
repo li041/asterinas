@@ -169,7 +169,7 @@ struct VirtioFsInode {
 struct VirtioFsHandle {
     inode: Arc<VirtioFsInode>,
     fh: u64,
-    release_flags: u32,
+    flags: u32,
     cache_enabled: bool,
 }
 
@@ -411,7 +411,7 @@ impl VirtioFsInode {
     }
 
     fn open_handle(&self, access_mode: AccessMode) -> Result<VirtioFsHandle> {
-        let open_flags = match access_mode {
+        let flags = match access_mode {
             AccessMode::O_RDONLY => O_RDONLY,
             AccessMode::O_WRONLY => O_WRONLY,
             AccessMode::O_RDWR => O_RDWR,
@@ -420,7 +420,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let open_out = fs
             .device
-            .fuse_open(self.nodeid(), open_flags)
+            .fuse_open(self.nodeid(), flags)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs open failed"))?;
         let cache_enabled =
             self.page_cache.is_some() && (open_out.open_flags & FOPEN_DIRECT_IO == 0);
@@ -432,14 +432,14 @@ impl VirtioFsInode {
         let Some(inode) = self.this.upgrade() else {
             let _ = fs
                 .device
-                .fuse_release(self.nodeid(), open_out.fh, open_flags);
+                .fuse_release(self.nodeid(), open_out.fh, flags);
             return_errno_with_message!(Errno::EIO, "virtiofs inode is unavailable");
         };
 
         Ok(VirtioFsHandle {
             inode,
             fh: open_out.fh,
-            release_flags: open_flags,
+            flags,
             cache_enabled,
         })
     }
@@ -516,7 +516,7 @@ impl Drop for VirtioFsHandle {
         if let Some(fs) = self.inode.fs.upgrade() {
             let _ = fs
                 .device
-                .fuse_release(self.inode.nodeid(), self.fh, self.release_flags);
+                .fuse_release(self.inode.nodeid(), self.fh, self.flags);
         }
     }
 }
