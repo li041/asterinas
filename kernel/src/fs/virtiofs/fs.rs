@@ -223,7 +223,7 @@ impl VirtioFsInode {
         if self
             .entry_valid_until
             .read()
-            .is_some_and(|valid_until| now < valid_until)
+            .is_none_or(|valid_until| now < valid_until)
         {
             return Ok(());
         }
@@ -255,14 +255,7 @@ impl VirtioFsInode {
         Ok(())
     }
 
-    fn refresh_attr_if_needed(&self) -> Result<()> {
-        let now = MonotonicCoarseClock::get().read_time();
-        let should_refresh = now >= *self.attr_valid_until.read();
-
-        if !should_refresh {
-            return Ok(());
-        }
-
+    fn revalidate_attr(&self) -> Result<()> {
         let now = MonotonicCoarseClock::get().read_time();
         if now < *self.attr_valid_until.read() {
             return Ok(());
@@ -276,13 +269,14 @@ impl VirtioFsInode {
         if old_metadata.mtime != new_metadata.mtime {
             self.invalidate_page_cache(new_metadata.size)?;
         }
-
         *self.metadata.write() = new_metadata;
+
         let now = MonotonicCoarseClock::get().read_time();
         *self.attr_valid_until.write() = now.saturating_add(valid_duration(
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
         ));
+
         Ok(())
     }
 
@@ -312,12 +306,8 @@ impl VirtioFsInode {
         Ok(())
     }
 
-    fn mark_attr_stale(&self) {
-        *self.attr_valid_until.write() = Duration::ZERO;
-    }
-
     fn cached_read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
-        self.refresh_attr_if_needed()?;
+        self.revalidate_attr()?;
 
         let Some(page_cache) = &self.page_cache else {
             return self.direct_read_at(offset, writer);
@@ -332,7 +322,7 @@ impl VirtioFsInode {
     }
 
     fn direct_read_at(&self, offset: usize, writer: &mut VmWriter) -> Result<usize> {
-        self.refresh_attr_if_needed()?;
+        self.revalidate_attr()?;
 
         let file_size = self.size();
         let start = file_size.min(offset);
@@ -375,7 +365,6 @@ impl VirtioFsInode {
         }
         page_cache.pages().write(offset, reader)?;
 
-        self.mark_attr_stale();
         Ok(write_len)
     }
 
@@ -406,7 +395,7 @@ impl VirtioFsInode {
         }
 
         self.invalidate_page_cache(self.size())?;
-        self.mark_attr_stale();
+
         Ok(written)
     }
 
@@ -430,9 +419,7 @@ impl VirtioFsInode {
         }
 
         let Some(inode) = self.this.upgrade() else {
-            let _ = fs
-                .device
-                .fuse_release(self.nodeid(), open_out.fh, flags);
+            let _ = fs.device.fuse_release(self.nodeid(), open_out.fh, flags);
             return_errno_with_message!(Errno::EIO, "virtiofs inode is unavailable");
         };
 
@@ -622,7 +609,7 @@ impl Inode for VirtioFsInode {
             }
             *self.metadata.write() = new_metadata;
         }
-        self.mark_attr_stale();
+
         Ok(())
     }
 
