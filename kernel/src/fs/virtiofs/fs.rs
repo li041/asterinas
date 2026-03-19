@@ -11,9 +11,12 @@ use core::{
 };
 
 use aster_block::bio::BioWaiter;
-use aster_virtio::device::filesystem::{
-    device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-    protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
+use aster_virtio::device::{
+    filesystem::{
+        device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
+        protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
+    },
+    socket::error,
 };
 use ostd::{
     mm::{HasSize, VmReader, VmWriter, io_util::HasVmReaderWriter},
@@ -263,7 +266,6 @@ impl VirtioFsInode {
             return Ok(());
         }
 
-        let mut page_cache = self.page_cache.as_ref().map(|page_cache| page_cache.lock());
         let now = MonotonicCoarseClock::get().read_time();
         if now < *self.attr_valid_until.read() {
             return Ok(());
@@ -275,13 +277,7 @@ impl VirtioFsInode {
 
         let new_metadata = Metadata::from(attr_out.attr);
         if old_metadata.mtime != new_metadata.mtime {
-            if let Some(page_cache) = page_cache.as_mut() {
-                Self::invalidate_page_cache_locked(page_cache, new_metadata.size)?;
-            }
-        } else if let Some(page_cache) = page_cache.as_mut()
-            && page_cache.pages().size() != new_metadata.size
-        {
-            page_cache.resize(new_metadata.size)?;
+            self.invalidate_page_cache(new_metadata.size)?;
         }
 
         *self.metadata.write() = new_metadata;
@@ -293,21 +289,21 @@ impl VirtioFsInode {
         Ok(())
     }
 
-    fn invalidate_page_cache_locked(page_cache: &mut PageCache, new_size: usize) -> Result<()> {
+    fn invalidate_page_cache(&self, new_size: usize) -> Result<()> {
+        let Some(page_cache) = &self.page_cache else {
+            return Ok(());
+        };
+
+        let page_cache = &mut page_cache.lock();
+
         let cached_size = page_cache.pages().size();
         if cached_size > 0 {
             page_cache.discard_range(0..cached_size);
             page_cache.resize(0)?;
         }
         page_cache.resize(new_size)?;
-        Ok(())
-    }
 
-    fn invalidate_page_cache(&self, new_size: usize) -> Result<()> {
-        let Some(page_cache) = &self.page_cache else {
-            return Ok(());
-        };
-        Self::invalidate_page_cache_locked(&mut page_cache.lock(), new_size)
+        Ok(())
     }
 
     fn flush_page_cache(&self) -> Result<()> {
@@ -368,7 +364,7 @@ impl VirtioFsInode {
         let Some(page_cache) = &self.page_cache else {
             return self.direct_write_at(offset, reader);
         };
-        let mut page_cache = page_cache.lock();
+        let page_cache = page_cache.lock();
 
         let write_len = reader.remain();
         let new_size = offset + write_len;
