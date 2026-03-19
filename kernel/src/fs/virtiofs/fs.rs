@@ -29,7 +29,7 @@ use crate::{
         utils::{
             AccessMode, CachePage, DirentVisitor, Extension, FileSystem, FsEventSubscriberStats,
             FsFlags, Inode, InodeIo, InodeMode, InodeType, Metadata, PageCache, PageCacheBackend,
-            StatusFlags, SuperBlock, SymbolicLink,
+            SeekFrom, StatusFlags, SuperBlock, SymbolicLink,
         },
     },
     prelude::*,
@@ -573,6 +573,37 @@ impl FileIo for VirtioFsHandle {
 
     fn is_offset_aware(&self) -> bool {
         true
+    }
+
+    fn seek(&self, offset: &Mutex<usize>, pos: SeekFrom) -> Result<usize> {
+        const SEEK_SET: u32 = 0;
+        const SEEK_CUR: u32 = 1;
+        const SEEK_END: u32 = 2;
+
+        let (in_offset, whence) = match pos {
+            SeekFrom::Start(off) => (
+                i64::try_from(off)
+                    .map_err(|_| Error::with_message(Errno::EOVERFLOW, "offset too large"))?,
+                SEEK_SET,
+            ),
+            SeekFrom::Current(diff) => (diff as i64, SEEK_CUR),
+            SeekFrom::End(diff) => (diff as i64, SEEK_END),
+        };
+
+        let fs = self.inode.fs_ref();
+        let new_offset = fs
+            .device
+            .fuse_lseek(self.inode.nodeid(), self.fh, in_offset, whence)
+            .map_err(Error::from)?;
+
+        if new_offset < 0 {
+            return_errno_with_message!(Errno::EINVAL, "seek returned negative offset")
+        }
+
+        let new_offset = usize::try_from(new_offset)
+            .map_err(|_| Error::with_message(Errno::EOVERFLOW, "seek result too large"))?;
+        *offset.lock() = new_offset;
+        Ok(new_offset)
     }
 }
 
