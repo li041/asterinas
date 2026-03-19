@@ -567,6 +567,45 @@ impl FileSystemDevice {
         Ok(())
     }
 
+    pub fn fuse_lseek(
+        &self,
+        nodeid: u64,
+        fh: u64,
+        offset: i64,
+        whence: u32,
+    ) -> Result<i64, VirtioDeviceError> {
+        let unique = self.alloc_unique();
+
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + size_of::<LseekIn>()) as u32,
+            FUSE_OPCODE_LSEEK,
+            unique,
+            nodeid,
+        );
+        let lseek_in = LseekIn::new(fh, offset, whence);
+
+        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+            self.prepare_request_slices(in_header, lseek_in, size_of::<LseekOut>());
+
+        let selector = self.select_request_queue(nodeid);
+        self.submit_request_and_wait(
+            selector,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
+
+        self.check_reply(&out_header_slice, unique, false)?;
+
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
+            .unwrap();
+        let lseek_out: LseekOut = out_payload_slice.read_val(0).unwrap();
+
+        Ok(lseek_out.offset)
+    }
+
     pub fn fuse_read(
         &self,
         nodeid: u64,

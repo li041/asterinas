@@ -132,6 +132,32 @@ impl ReleaseIn {
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
+pub struct LseekIn {
+    pub fh: u64,
+    pub offset: i64,
+    pub whence: u32,
+    pub padding: u32,
+}
+
+impl LseekIn {
+    pub const fn new(fh: u64, offset: i64, whence: u32) -> Self {
+        Self {
+            fh,
+            offset,
+            whence,
+            padding: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Pod, Clone, Copy)]
+pub struct LseekOut {
+    pub offset: i64,
+}
+
+#[repr(C)]
+#[derive(Debug, Pod, Clone, Copy)]
 pub struct OpenOut {
     pub fh: u64,
     pub open_flags: u32,
@@ -444,6 +470,7 @@ pub const FUSE_OPCODE_LINK: u32 = FuseOpcode::Link as u32;
 pub const FUSE_OPCODE_OPENDIR: u32 = FuseOpcode::Opendir as u32;
 pub const FUSE_OPCODE_READDIR: u32 = FuseOpcode::Readdir as u32;
 pub const FUSE_OPCODE_RELEASEDIR: u32 = FuseOpcode::Releasedir as u32;
+pub const FUSE_OPCODE_LSEEK: u32 = FuseOpcode::Lseek as u32;
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
