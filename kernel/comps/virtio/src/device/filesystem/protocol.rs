@@ -439,9 +439,23 @@ pub const FUSE_OPCODE_CREATE: u32 = FuseOpcode::Create as u32;
 pub const FUSE_OPCODE_MKDIR: u32 = FuseOpcode::Mkdir as u32;
 pub const FUSE_OPCODE_UNLINK: u32 = FuseOpcode::Unlink as u32;
 pub const FUSE_OPCODE_RMDIR: u32 = FuseOpcode::Rmdir as u32;
+pub const FUSE_OPCODE_READLINK: u32 = FuseOpcode::Readlink as u32;
+pub const FUSE_OPCODE_LINK: u32 = FuseOpcode::Link as u32;
 pub const FUSE_OPCODE_OPENDIR: u32 = FuseOpcode::Opendir as u32;
 pub const FUSE_OPCODE_READDIR: u32 = FuseOpcode::Readdir as u32;
 pub const FUSE_OPCODE_RELEASEDIR: u32 = FuseOpcode::Releasedir as u32;
+
+#[repr(C)]
+#[derive(Debug, Pod, Clone, Copy)]
+pub struct LinkIn {
+    pub oldnodeid: u64,
+}
+
+impl LinkIn {
+    pub const fn new(oldnodeid: u64) -> Self {
+        Self { oldnodeid }
+    }
+}
 
 pub const FUSE_KERNEL_VERSION: u32 = 7;
 pub const FUSE_KERNEL_MINOR_VERSION: u32 = 38;
