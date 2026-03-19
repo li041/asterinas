@@ -549,8 +549,15 @@ impl InodeIo for VirtioFsHandle {
         &self,
         offset: usize,
         reader: &mut VmReader,
-        _status_flags: StatusFlags,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
+        let offset = if status_flags.contains(StatusFlags::O_APPEND) {
+            self.inode.revalidate_attr()?;
+            self.inode.size()
+        } else {
+            offset
+        };
+
         if self.cache_enabled {
             self.inode.cached_write_at(offset, reader)
         } else {
@@ -588,12 +595,19 @@ impl InodeIo for VirtioFsInode {
         &self,
         offset: usize,
         reader: &mut VmReader,
-        _status_flags: StatusFlags,
+        status_flags: StatusFlags,
     ) -> Result<usize> {
         let metadata = self.metadata();
         if metadata.type_ != InodeType::File {
             return_errno_with_message!(Errno::EISDIR, "inode is not a regular file");
         }
+
+        let offset = if status_flags.contains(StatusFlags::O_APPEND) {
+            self.revalidate_attr()?;
+            self.size()
+        } else {
+            offset
+        };
 
         self.cached_write_at(offset, reader)
     }
