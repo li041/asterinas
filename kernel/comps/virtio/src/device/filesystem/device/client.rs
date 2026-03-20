@@ -259,7 +259,11 @@ impl FileSystemDevice {
         Ok(out_payload_slice.read_val(0).unwrap())
     }
 
-    pub fn fuse_setattr(&self, nodeid: u64, size: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
+    pub fn fuse_setattr(
+        &self,
+        nodeid: u64,
+        setattr_in: SetattrIn,
+    ) -> Result<FuseAttrOut, VirtioDeviceError> {
         let unique = self.alloc_unique();
 
         let in_header = InHeader::new(
@@ -268,8 +272,6 @@ impl FileSystemDevice {
             unique,
             nodeid,
         );
-        let setattr_in = SetattrIn::new_size(size);
-
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, setattr_in, size_of::<FuseAttrOut>());
 

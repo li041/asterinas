@@ -13,8 +13,12 @@ use core::{
 use aster_block::bio::BioWaiter;
 use aster_virtio::device::filesystem::{
     device::{FileSystemDevice, VirtioFsDirEntry, get_device_by_tag},
-    protocol::{FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut},
+    protocol::{
+        FATTR_ATIME, FATTR_CTIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID,
+        FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FUSE_ROOT_ID, FuseAttrOut, SetattrIn,
+    },
 };
+use log::warn;
 use ostd::{
     mm::{HasSize, VmReader, VmWriter, io_util::HasVmReaderWriter},
     sync::RwLock,
@@ -457,6 +461,29 @@ impl VirtioFsInode {
             cache_enabled,
         })
     }
+
+    fn apply_setattr(&self, setattr_in: SetattrIn) -> Result<()> {
+        let fs = self.fs_ref();
+        let attr_out = fs
+            .device
+            .fuse_setattr(self.nodeid(), setattr_in)
+            .map_err(Error::from)?;
+
+        let old_metadata = self.metadata();
+        let new_metadata = Metadata::from(attr_out.attr);
+        if old_metadata.mtime != new_metadata.mtime {
+            self.invalidate_page_cache(new_metadata.size)?;
+        }
+        *self.metadata.write() = new_metadata;
+
+        let now = MonotonicCoarseClock::get().read_time();
+        *self.attr_valid_until.write() = now.saturating_add(valid_duration(
+            attr_out.attr_valid,
+            attr_out.attr_valid_nsec,
+        ));
+
+        Ok(())
+    }
 }
 
 impl Drop for VirtioFsInode {
@@ -657,21 +684,12 @@ impl Inode for VirtioFsInode {
         let size = u64::try_from(new_size)
             .map_err(|_| Error::with_message(Errno::EFBIG, "virtiofs resize size too large"))?;
 
-        let fs = self.fs_ref();
-        let attr_out = fs
-            .device
-            .fuse_setattr(self.nodeid(), size)
-            .map_err(Error::from)?;
-
-        let new_metadata = Metadata::from(attr_out.attr);
-        {
-            if let Some(page_cache) = &self.page_cache {
-                page_cache.lock().resize(new_metadata.size)?;
-            }
-            *self.metadata.write() = new_metadata;
-        }
-
-        Ok(())
+        let setattr_in = SetattrIn {
+            valid: FATTR_SIZE,
+            size,
+            ..SetattrIn::default()
+        };
+        self.apply_setattr(setattr_in)
     }
 
     fn metadata(&self) -> Metadata {
@@ -691,8 +709,13 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
-        self.metadata.write().mode = mode;
-        Ok(())
+        let mode_bits = (self.type_() as u32) | u32::from(mode.bits());
+        let setattr_in = SetattrIn {
+            valid: FATTR_MODE,
+            mode: mode_bits,
+            ..SetattrIn::default()
+        };
+        self.apply_setattr(setattr_in)
     }
 
     fn owner(&self) -> Result<Uid> {
@@ -700,16 +723,24 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_owner(&self, uid: Uid) -> Result<()> {
-        self.metadata.write().uid = uid;
-        Ok(())
+        let setattr_in = SetattrIn {
+            valid: FATTR_UID,
+            uid: uid.into(),
+            ..SetattrIn::default()
+        };
+        self.apply_setattr(setattr_in)
     }
     fn group(&self) -> Result<Gid> {
         Ok(self.metadata.read().gid)
     }
 
     fn set_group(&self, gid: Gid) -> Result<()> {
-        self.metadata.write().gid = gid;
-        Ok(())
+        let setattr_in = SetattrIn {
+            valid: FATTR_GID,
+            gid: gid.into(),
+            ..SetattrIn::default()
+        };
+        self.apply_setattr(setattr_in)
     }
 
     fn atime(&self) -> Duration {
@@ -717,7 +748,19 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_atime(&self, time: Duration) {
-        self.metadata.write().atime = time;
+        let setattr_in = SetattrIn {
+            valid: FATTR_ATIME,
+            atime: time.as_secs(),
+            atimensec: time.subsec_nanos(),
+            ..SetattrIn::default()
+        };
+        if let Err(err) = self.apply_setattr(setattr_in) {
+            warn!(
+                "virtiofs set_atime failed for inode {}: {:?}",
+                self.nodeid(),
+                err
+            );
+        }
     }
 
     fn mtime(&self) -> Duration {
@@ -725,7 +768,19 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_mtime(&self, time: Duration) {
-        self.metadata.write().mtime = time;
+        let setattr_in = SetattrIn {
+            valid: FATTR_MTIME,
+            mtime: time.as_secs(),
+            mtimensec: time.subsec_nanos(),
+            ..SetattrIn::default()
+        };
+        if let Err(err) = self.apply_setattr(setattr_in) {
+            warn!(
+                "virtiofs set_mtime failed for inode {}: {:?}",
+                self.nodeid(),
+                err
+            );
+        }
     }
 
     fn ctime(&self) -> Duration {
@@ -733,7 +788,19 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_ctime(&self, time: Duration) {
-        self.metadata.write().ctime = time;
+        let setattr_in = SetattrIn {
+            valid: FATTR_CTIME,
+            ctime: time.as_secs(),
+            ctimensec: time.subsec_nanos(),
+            ..SetattrIn::default()
+        };
+        if let Err(err) = self.apply_setattr(setattr_in) {
+            warn!(
+                "virtiofs set_ctime failed for inode {}: {:?}",
+                self.nodeid(),
+                err
+            );
+        }
     }
 
     fn page_cache(&self) -> Option<Arc<Vmo>> {

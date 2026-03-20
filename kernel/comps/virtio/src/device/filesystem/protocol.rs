@@ -188,7 +188,7 @@ pub const FATTR_LOCKOWNER: u32 = 1 << 9;
 pub const FATTR_CTIME: u32 = 1 << 10;
 
 #[repr(C)]
-#[derive(Debug, Pod, Clone, Copy)]
+#[derive(Debug, Pod, Clone, Copy, Default)]
 pub struct SetattrIn {
     pub valid: u32,
     pub padding: u32,
@@ -206,29 +206,6 @@ pub struct SetattrIn {
     pub uid: u32,
     pub gid: u32,
     pub unused5: u32,
-}
-
-impl SetattrIn {
-    pub const fn new_size(size: u64) -> Self {
-        Self {
-            valid: FATTR_SIZE,
-            padding: 0,
-            fh: 0,
-            size,
-            lock_owner: 0,
-            atime: 0,
-            mtime: 0,
-            ctime: 0,
-            atimensec: 0,
-            mtimensec: 0,
-            ctimensec: 0,
-            mode: 0,
-            unused4: 0,
-            uid: 0,
-            gid: 0,
-            unused5: 0,
-        }
-    }
 }
 
 impl GetattrIn {
