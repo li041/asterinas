@@ -321,6 +321,26 @@ impl MkdirIn {
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
+pub struct MknodIn {
+    pub mode: u32,
+    pub rdev: u32,
+    pub umask: u32,
+    pub padding: u32,
+}
+
+impl MknodIn {
+    pub const fn new(mode: u32, rdev: u32) -> Self {
+        Self {
+            mode,
+            rdev,
+            umask: 0,
+            padding: 0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Pod, Clone, Copy)]
 pub struct ForgetIn {
     pub nlookup: u64,
 }
@@ -439,6 +459,7 @@ pub const FUSE_OPCODE_READ: u32 = FuseOpcode::Read as u32;
 pub const FUSE_OPCODE_WRITE: u32 = FuseOpcode::Write as u32;
 pub const FUSE_OPCODE_RELEASE: u32 = FuseOpcode::Release as u32;
 pub const FUSE_OPCODE_CREATE: u32 = FuseOpcode::Create as u32;
+pub const FUSE_OPCODE_MKNOD: u32 = FuseOpcode::Mknod as u32;
 pub const FUSE_OPCODE_MKDIR: u32 = FuseOpcode::Mkdir as u32;
 pub const FUSE_OPCODE_UNLINK: u32 = FuseOpcode::Unlink as u32;
 pub const FUSE_OPCODE_RMDIR: u32 = FuseOpcode::Rmdir as u32;

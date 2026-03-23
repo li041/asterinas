@@ -128,6 +128,47 @@ impl FileSystemDevice {
         Ok(entry_out)
     }
 
+    pub fn fuse_mknod(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+        mode: u32,
+        rdev: u32,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        let unique = self.alloc_unique();
+
+        let in_header = InHeader::new(
+            (size_of::<InHeader>() + size_of::<MknodIn>() + name.len() + 1) as u32,
+            FUSE_OPCODE_MKNOD,
+            unique,
+            parent_nodeid,
+        );
+        let mknod_in = MknodIn::new(mode, rdev);
+
+        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+            self.prepare_request_slices(in_header, mknod_in, size_of::<EntryOut>());
+
+        let in_name_slice = self.prepare_in_name_buf(name);
+
+        let selector = self.select_request_queue(parent_nodeid);
+        self.submit_request_and_wait(
+            selector,
+            unique,
+            &[&in_header_slice, &in_payload_slice, &in_name_slice],
+            &[&out_header_slice, &out_payload_slice],
+        )?;
+
+        self.check_reply(&out_header_slice, unique, true)?;
+
+        out_payload_slice
+            .mem_obj()
+            .sync_from_device(out_payload_slice.offset().clone())
+            .unwrap();
+        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
+
+        Ok(entry_out)
+    }
+
     pub fn fuse_unlink(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
         let unique = self.alloc_unique();
 

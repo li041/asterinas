@@ -50,6 +50,7 @@ const BLOCK_SIZE: usize = 4096;
 const NAME_MAX: usize = 255;
 const S_IFREG: u32 = 0o100000;
 const S_IFDIR: u32 = 0o040000;
+const S_IFSOCK: u32 = 0o140000;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
@@ -883,10 +884,17 @@ impl Inode for VirtioFsInode {
                     .map_err(Error::from)?;
                 (entry_out, None)
             }
+            InodeType::Socket => {
+                let entry_out = fs
+                    .device
+                    .fuse_mknod(parent_nodeid, name, S_IFSOCK | mode.bits() as u32, 0)
+                    .map_err(Error::from)?;
+                (entry_out, None)
+            }
             _ => {
                 return_errno_with_message!(
                     Errno::EOPNOTSUPP,
-                    "virtiofs create supports file/dir only"
+                    "virtiofs create supports file/dir/socket only"
                 )
             }
         };
