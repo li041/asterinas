@@ -37,6 +37,10 @@ CONSOLE ?= hvc0
 ROOTFS ?= ramfs
 VIRTIOFS_TAG ?= myfs
 VIRTIOFS_SHARED_DIR ?= /tmp/shared_dir
+# 9P shared directory (for virtio-9p transport)
+VIRTIO9P_TAG ?= my9p
+VIRTIO9P_SHARED_DIR ?= /tmp/9p_shared
+ENABLE_9P ?= 0
 # End of global build options.
 
 # GDB debugging and profiling options.

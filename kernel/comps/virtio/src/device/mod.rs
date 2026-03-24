@@ -10,6 +10,7 @@ pub mod filesystem;
 pub mod input;
 pub mod network;
 pub mod socket;
+pub mod transport9p;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, TryFromInt)]
 #[repr(u8)]

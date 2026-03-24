@@ -240,13 +240,25 @@ fn open_fs(
         Some(user_space.read_cstring(data_addr, MAX_FILENAME_LEN)?)
     };
 
-    if data.is_none()
-        && fs_type.name() == "virtiofs"
+    if fs_type.name() == "virtiofs"
+        && data.is_none()
         && let Some(source) = dev_name
     {
         data = Some(
             CString::new(source)
                 .map_err(|_| Error::with_message(Errno::EINVAL, "invalid virtiofs source"))?,
+        );
+    }
+
+    // Linux-compatible 9P mount convention: the mount source carries the tag
+    // (`mount -t 9p <tag> <target> -o ...`). Use source as the tag whenever
+    // it is provided, regardless of the option string.
+    if fs_type.name() == "9p"
+        && let Some(source) = dev_name
+    {
+        data = Some(
+            CString::new(source)
+                .map_err(|_| Error::with_message(Errno::EINVAL, "invalid 9p source(tag)"))?,
         );
     }
 
