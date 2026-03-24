@@ -18,6 +18,9 @@
 #  - ENABLE_9P: "0" or "1" to enable virtio-9p device;
 #  - VIRTIO9P_TAG: mount tag for 9p device;
 #  - VIRTIO9P_SHARED_DIR: host directory shared via 9p.
+#  - ENABLE_VIRTIOFS: "0" or "1" to enable vhost-user virtio-fs device;
+#  - VIRTIOFS_TAG: mount tag for virtio-fs device;
+#  - VIRTIOFS_SOCKET: vhost-user socket path for virtio-fs backend.
 
 OVMF=${OVMF:-"on"}
 VHOST=${VHOST:-"off"}
@@ -27,6 +30,9 @@ CONSOLE=${CONSOLE:-"hvc0"}
 ENABLE_9P=${ENABLE_9P:-"0"}
 VIRTIO9P_TAG=${VIRTIO9P_TAG:-"host0"}
 VIRTIO9P_SHARED_DIR=${VIRTIO9P_SHARED_DIR:-"/tmp/9p_shared"}
+ENABLE_VIRTIOFS=${ENABLE_VIRTIOFS:-"0"}
+VIRTIOFS_TAG=${VIRTIOFS_TAG:-"myfs"}
+VIRTIOFS_SOCKET=${VIRTIOFS_SOCKET:-"/tmp/vhostqemu/vfs.sock"}
 
 SSH_RAND_PORT=${SSH_PORT:-$(shuf -i 1024-65535 -n 1)}
 NGINX_RAND_PORT=${NGINX_PORT:-$(shuf -i 1024-65535 -n 1)}
@@ -126,13 +132,20 @@ QEMU_ARGS="\
     -device virtio-blk-pci,bus=pcie.0,addr=0x7,drive=x1,serial=vexfat,disable-legacy=on,disable-modern=off,queue-size=64,num-queues=1,request-merging=off,backend_defaults=off,discard=off,write-zeroes=off,event_idx=off,indirect_desc=off,queue_reset=off$IOMMU_DEV_EXTRA \
     -object memory-backend-memfd,id=mem0,size=${MEM:-8G},share=on \
     -numa node,memdev=mem0 \
-    -chardev socket,id=char0,path=/tmp/vhostqemu/vfs.sock \
-    -device vhost-user-fs-pci,chardev=char0,tag=myfs \
     -device virtio-net-pci,netdev=net01,disable-legacy=on,disable-modern=off$VIRTIO_NET_FEATURES$IOMMU_DEV_EXTRA \
     -device virtio-serial-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
     $CONSOLE_ARGS \
     $IOMMU_EXTRA_ARGS \
 "
+
+if [ "$ENABLE_VIRTIOFS" = "1" ]; then
+    echo "[$1] Enabled virtio-fs: tag=$VIRTIOFS_TAG, socket=$VIRTIOFS_SOCKET" 1>&2
+    QEMU_ARGS="
+        $QEMU_ARGS \
+        -chardev socket,id=char0,path=$VIRTIOFS_SOCKET \
+        -device vhost-user-fs-pci,chardev=char0,tag=$VIRTIOFS_TAG \
+    "
+fi
 
 MICROVM_QEMU_ARGS="\
     $COMMON_QEMU_ARGS \

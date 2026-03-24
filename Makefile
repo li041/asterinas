@@ -37,6 +37,11 @@ CONSOLE ?= hvc0
 ROOTFS ?= ramfs
 VIRTIOFS_TAG ?= myfs
 VIRTIOFS_SHARED_DIR ?= /tmp/shared_dir
+# Whether to attach virtio-fs device to QEMU:
+# - empty: auto (enabled when ROOTFS=virtiofs, otherwise disabled)
+# - 0: disable virtio-fs device
+# - 1: enable virtio-fs device
+ENABLE_VIRTIOFS ?=
 # 9P shared directory (for virtio-9p transport)
 VIRTIO9P_TAG ?= my9p
 VIRTIO9P_SHARED_DIR ?= /tmp/9p_shared
@@ -100,6 +105,14 @@ CARGO_OSDK_COMMON_ARGS := --target-arch=$(OSDK_TARGET_ARCH)
 CARGO_OSDK_BUILD_ARGS := --kcmd-args="ostd.log_level=$(LOG_LEVEL)"
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="console=$(CONSOLE)"
 CARGO_OSDK_TEST_ARGS :=
+
+ifeq ($(strip $(ENABLE_VIRTIOFS)),)
+	ifeq ($(ROOTFS),virtiofs)
+	ENABLE_VIRTIOFS := 1
+	else
+	ENABLE_VIRTIOFS := 0
+	endif
+endif
 
 ifeq ($(AUTO_TEST), syscall)
 BUILD_SYSCALL_TEST := 1
