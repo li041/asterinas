@@ -24,6 +24,7 @@ use device::{
     input::device::InputDevice,
     network::device::NetworkDevice,
     socket::{self, device::SocketDevice},
+    transport9p::device::Transport9PDevice,
 };
 use log::{error, warn};
 use spin::Once;
@@ -78,6 +79,7 @@ fn virtio_component_init() -> Result<(), ComponentInitError> {
             VirtioDeviceType::Console => ConsoleDevice::init(transport),
             VirtioDeviceType::Socket => SocketDevice::init(transport),
             VirtioDeviceType::FileSystem => FileSystemDevice::init(transport),
+            VirtioDeviceType::Transport9P => Transport9PDevice::init(transport),
             _ => {
                 warn!("[Virtio]: Found unimplemented device:{:?}", device_type);
                 Ok(())
@@ -115,6 +117,9 @@ fn negotiate_features(transport: &mut Box<dyn VirtioTransport>) {
         VirtioDeviceType::Socket => SocketDevice::negotiate_features(device_specified_features),
         VirtioDeviceType::FileSystem => {
             FileSystemDevice::negotiate_features(device_specified_features)
+        }
+        VirtioDeviceType::Transport9P => {
+            Transport9PDevice::negotiate_features(device_specified_features)
         }
         _ => device_specified_features,
     };

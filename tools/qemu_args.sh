@@ -15,12 +15,18 @@
 #  - SMP: number of CPUs;
 #  - MEM: amount of memory, e.g. "8G";
 #  - VNC_PORT: VNC port, default is "42".
+#  - ENABLE_9P: "0" or "1" to enable virtio-9p device;
+#  - VIRTIO9P_TAG: mount tag for 9p device;
+#  - VIRTIO9P_SHARED_DIR: host directory shared via 9p.
 
 OVMF=${OVMF:-"on"}
 VHOST=${VHOST:-"off"}
 VSOCK=${VSOCK:-"off"}
 NETDEV=${NETDEV:-"user"}
 CONSOLE=${CONSOLE:-"hvc0"}
+ENABLE_9P=${ENABLE_9P:-"0"}
+VIRTIO9P_TAG=${VIRTIO9P_TAG:-"host0"}
+VIRTIO9P_SHARED_DIR=${VIRTIO9P_SHARED_DIR:-"/tmp/9p_shared"}
 
 SSH_RAND_PORT=${SSH_PORT:-$(shuf -i 1024-65535 -n 1)}
 NGINX_RAND_PORT=${NGINX_PORT:-$(shuf -i 1024-65535 -n 1)}
@@ -140,6 +146,25 @@ MICROVM_QEMU_ARGS="\
     -device virtio-serial-device \
     $CONSOLE_ARGS \
 "
+
+if [ "$ENABLE_9P" = "1" ]; then
+    # Create the shared directory if it doesn't exist
+    mkdir -p "$VIRTIO9P_SHARED_DIR" 2>/dev/null
+    echo "[$1] Enabled virtio-9p: tag=$VIRTIO9P_TAG, dir=$VIRTIO9P_SHARED_DIR" 1>&2
+    if [ "$1" = "microvm" ]; then
+        MICROVM_QEMU_ARGS="
+            $MICROVM_QEMU_ARGS \
+            -fsdev local,id=fsdev9p,path=$VIRTIO9P_SHARED_DIR,security_model=mapped-xattr \
+            -device virtio-9p-device,fsdev=fsdev9p,mount_tag=$VIRTIO9P_TAG \
+        "
+    else
+        QEMU_ARGS="
+            $QEMU_ARGS \
+            -fsdev local,id=fsdev9p,path=$VIRTIO9P_SHARED_DIR,security_model=mapped-xattr \
+            -device virtio-9p-pci,fsdev=fsdev9p,mount_tag=$VIRTIO9P_TAG,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
+        "
+    fi
+fi
 
 if [ "$VSOCK" = "on" ]; then
     # RAND_CID=$(shuf -i 3-65535 -n 1)
