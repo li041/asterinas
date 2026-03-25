@@ -35,6 +35,7 @@ extern crate ostd_pod;
 mod arch;
 
 mod context;
+pub mod crypto;
 mod cpu;
 mod device;
 mod driver;

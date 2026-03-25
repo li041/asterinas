@@ -4,15 +4,6 @@
 
 use super::*;
 
-/// Directory entry returned by p9_readdir.
-#[derive(Debug, Clone)]
-pub struct P9DirEntryResult {
-    pub qid: P9Qid,
-    pub offset: u64,
-    pub type_: u8,
-    pub name: String,
-}
-
 impl Transport9PDevice {
     /// Tversion/Rversion — negotiate protocol version and msize.
     pub(crate) fn p9_version(&self) -> Result<(), VirtioDeviceError> {
@@ -32,8 +23,8 @@ impl Transport9PDevice {
         let negotiated_msize = cmp::min(msize, server_msize);
         self.msize.store(negotiated_msize, Ordering::Relaxed);
 
-        let (version, _) = decode_string(&resp_body[4..])
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (version, _) =
+            decode_string(&resp_body[4..]).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         info!(
             "{} version negotiated: version={}, msize={}",
@@ -66,8 +57,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RATTACH)?;
 
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(qid)
     }
@@ -101,8 +91,8 @@ impl Transport9PDevice {
         let mut qids = Vec::with_capacity(nwqid);
         let mut pos = 2;
         for _ in 0..nwqid {
-            let (qid, consumed) = P9Qid::decode(&resp_body[pos..])
-                .ok_or(VirtioDeviceError::QueueUnknownError)?;
+            let (qid, consumed) =
+                P9Qid::decode(&resp_body[pos..]).ok_or(VirtioDeviceError::QueueUnknownError)?;
             qids.push(qid);
             pos += consumed;
         }
@@ -111,11 +101,7 @@ impl Transport9PDevice {
     }
 
     /// Tlopen/Rlopen — open a file by fid, returning (qid, iounit).
-    pub fn p9_lopen(
-        &self,
-        fid: u32,
-        flags: u32,
-    ) -> Result<(P9Qid, u32), VirtioDeviceError> {
+    pub fn p9_lopen(&self, fid: u32, flags: u32) -> Result<(P9Qid, u32), VirtioDeviceError> {
         let mut body = Vec::new();
         body.extend_from_slice(&fid.to_le_bytes());
         body.extend_from_slice(&flags.to_le_bytes());
@@ -129,8 +115,7 @@ impl Transport9PDevice {
         if resp_body.len() < 17 {
             return Err(VirtioDeviceError::QueueUnknownError);
         }
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
         let iounit = read_u32_le(resp_body, 13);
 
         Ok((qid, iounit))
@@ -161,19 +146,14 @@ impl Transport9PDevice {
         if resp_body.len() < 17 {
             return Err(VirtioDeviceError::QueueUnknownError);
         }
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
         let iounit = read_u32_le(resp_body, 13);
 
         Ok((qid, iounit))
     }
 
     /// Tgetattr/Rgetattr.
-    pub fn p9_getattr(
-        &self,
-        fid: u32,
-        request_mask: u64,
-    ) -> Result<P9Attr, VirtioDeviceError> {
+    pub fn p9_getattr(&self, fid: u32, request_mask: u64) -> Result<P9Attr, VirtioDeviceError> {
         let mut body = Vec::new();
         body.extend_from_slice(&fid.to_le_bytes());
         body.extend_from_slice(&request_mask.to_le_bytes());
@@ -184,8 +164,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RGETATTR)?;
 
-        let (attr, _) = P9Attr::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (attr, _) = P9Attr::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(attr)
     }
@@ -226,12 +205,7 @@ impl Transport9PDevice {
     }
 
     /// Tread/Rread — read data from an open fid.
-    pub fn p9_read(
-        &self,
-        fid: u32,
-        offset: u64,
-        count: u32,
-    ) -> Result<Vec<u8>, VirtioDeviceError> {
+    pub fn p9_read(&self, fid: u32, offset: u64, count: u32) -> Result<Vec<u8>, VirtioDeviceError> {
         let mut body = Vec::new();
         body.extend_from_slice(&fid.to_le_bytes());
         body.extend_from_slice(&offset.to_le_bytes());
@@ -255,12 +229,7 @@ impl Transport9PDevice {
     }
 
     /// Twrite/Rwrite — write data to an open fid, returns bytes written.
-    pub fn p9_write(
-        &self,
-        fid: u32,
-        offset: u64,
-        data: &[u8],
-    ) -> Result<u32, VirtioDeviceError> {
+    pub fn p9_write(&self, fid: u32, offset: u64, data: &[u8]) -> Result<u32, VirtioDeviceError> {
         let mut body = Vec::new();
         body.extend_from_slice(&fid.to_le_bytes());
         body.extend_from_slice(&offset.to_le_bytes());
@@ -346,8 +315,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RMKDIR)?;
 
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(qid)
     }
@@ -397,12 +365,7 @@ impl Transport9PDevice {
     }
 
     /// Tlink/Rlink — create a hard link.
-    pub fn p9_link(
-        &self,
-        dfid: u32,
-        fid: u32,
-        name: &str,
-    ) -> Result<(), VirtioDeviceError> {
+    pub fn p9_link(&self, dfid: u32, fid: u32, name: &str) -> Result<(), VirtioDeviceError> {
         let mut body = Vec::new();
         body.extend_from_slice(&dfid.to_le_bytes());
         body.extend_from_slice(&fid.to_le_bytes());
@@ -437,8 +400,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RSYMLINK)?;
 
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(qid)
     }
@@ -454,8 +416,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RREADLINK)?;
 
-        let (target, _) = decode_string(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (target, _) = decode_string(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(target)
     }
@@ -484,8 +445,7 @@ impl Transport9PDevice {
         let response = self.send_9p_request(&request, msize)?;
         let resp_body = Self::check_9p_response(&response, P9_RMKNOD)?;
 
-        let (qid, _) = P9Qid::decode(resp_body)
-            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let (qid, _) = P9Qid::decode(resp_body).ok_or(VirtioDeviceError::QueueUnknownError)?;
 
         Ok(qid)
     }

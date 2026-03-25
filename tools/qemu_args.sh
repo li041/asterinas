@@ -21,6 +21,9 @@
 #  - ENABLE_VIRTIOFS: "0" or "1" to enable vhost-user virtio-fs device;
 #  - VIRTIOFS_TAG: mount tag for virtio-fs device;
 #  - VIRTIOFS_SOCKET: vhost-user socket path for virtio-fs backend.
+#  - ENABLE_VIRTIO_CRYPTO: "0" or "1" to enable virtio-crypto device;
+#  - VIRTIO_CRYPTO_QUEUES: number of virtio-crypto data queues;
+#  - VIRTIO_CRYPTO_QUEUE_SIZE: virtio-crypto queue size;
 
 OVMF=${OVMF:-"on"}
 VHOST=${VHOST:-"off"}
@@ -33,6 +36,7 @@ VIRTIO9P_SHARED_DIR=${VIRTIO9P_SHARED_DIR:-"/tmp/9p_shared"}
 ENABLE_VIRTIOFS=${ENABLE_VIRTIOFS:-"0"}
 VIRTIOFS_TAG=${VIRTIOFS_TAG:-"myfs"}
 VIRTIOFS_SOCKET=${VIRTIOFS_SOCKET:-"/tmp/vhostqemu/vfs.sock"}
+ENABLE_VIRTIO_CRYPTO=${ENABLE_VIRTIO_CRYPTO:-"0"}
 
 SSH_RAND_PORT=${SSH_PORT:-$(shuf -i 1024-65535 -n 1)}
 NGINX_RAND_PORT=${NGINX_PORT:-$(shuf -i 1024-65535 -n 1)}
@@ -192,6 +196,23 @@ if [ "$VSOCK" = "on" ]; then
         QEMU_ARGS="
             $QEMU_ARGS \
             -device vhost-vsock-pci,id=vhost-vsock-pci0,guest-cid=$RAND_CID,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
+        "
+    fi
+fi
+
+if [ "$ENABLE_VIRTIO_CRYPTO" = "1" ]; then
+    echo "[$1] Enabled virtio-crypto" 1>&2
+    if [ "$1" = "microvm" ]; then
+        MICROVM_QEMU_ARGS="
+            $MICROVM_QEMU_ARGS \
+            -object cryptodev-backend-builtin,id=cryptobuiltin0 \
+            -device virtio-crypto-device,id=virtio-crypto0,cryptodev=cryptobuiltin0 \
+        "
+    else
+        QEMU_ARGS="
+            $QEMU_ARGS \
+            -object cryptodev-backend-builtin,id=cryptobuiltin0 \
+            -device virtio-crypto-pci,id=virtio-crypto0,cryptodev=cryptobuiltin0 \
         "
     fi
 fi

@@ -11,11 +11,14 @@ use super::registry::char::{MajorIdOwner, acquire_major};
 
 #[cfg(all(target_arch = "x86_64", feature = "cvm_guest"))]
 pub mod tdxguest;
+pub mod crypto;
 
 static MISC_MAJOR: Once<MajorIdOwner> = Once::new();
 
 pub(super) fn init_in_first_kthread() {
     MISC_MAJOR.call_once(|| acquire_major(MajorId::new(10)).unwrap());
+
+    super::registry::char::register(crypto::CryptoDevice::new()).unwrap();
 
     #[cfg(target_arch = "x86_64")]
     ostd::if_tdx_enabled!({
