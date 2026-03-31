@@ -205,35 +205,35 @@ impl FileSystemDevice {
     pub(super) fn handle_queue_irq(&self, selector: QueueSelector) {
         let queue_state = self.queue(selector);
         loop {
-            let pop_result = {
+            let token = {
                 let mut queue = queue_state.queue.lock();
-                queue.pop_used()
+                match queue.pop_used() {
+                    Ok((token, _)) => token,
+                    Err(QueueError::NotReady) => break,
+                    Err(_) => break,
+                }
             };
 
-            let (token, _) = match pop_result {
-                Ok(completed) => completed,
-                Err(QueueError::NotReady) => break,
-                Err(_) => break,
-            };
-
-            let pending = queue_state
+            let Some(pending) = queue_state
                 .pending_requests
                 .disable_irq()
                 .lock()
-                .remove(&token);
-
-            let Some(pending) = pending else {
+                .remove(&token)
+            else {
                 continue;
             };
 
-            let mut request_states = queue_state.request_states.disable_irq().lock();
-            let request_state = request_states.entry(pending).or_insert(RequestWaitState {
-                completed: false,
-                waker: None,
-            });
-            request_state.completed = true;
+            let waker = {
+                let mut request_states = queue_state.request_states.disable_irq().lock();
+                let request_state = request_states.entry(pending).or_insert(RequestWaitState {
+                    completed: false,
+                    waker: None,
+                });
+                request_state.completed = true;
+                request_state.waker.take()
+            };
 
-            if let Some(waker) = request_state.waker.take() {
+            if let Some(waker) = waker {
                 let _ = waker.wake_up();
             }
         }
@@ -278,6 +278,8 @@ impl FileSystemDevice {
 
         let wait_res = waiter.wait_until_or_cancelled(
             || {
+                // TODO(high): Predicate 内部对 `request_states.disable_irq().lock()` 的持锁时间应极小。
+                // 确保 predicate 是非阻塞的，否则可能导致唤醒路径（IRQ）无法及时更新状态，出现 TOCTOU 或死锁。
                 let mut request_states = queue_state.request_states.disable_irq().lock();
                 if let Some(state) = request_states.get(&unique)
                     && state.completed
@@ -320,6 +322,8 @@ impl FileSystemDevice {
     ) -> Result<(), VirtioDeviceError> {
         let queue_state = self.queue(selector);
 
+        // TODO(high): 这是自旋等待版本，仅应在 early/非任务/不可睡眠上下文使用。
+        // 在普通任务上下文误用会导致 CPU 忙等并损坏系统性能。
         loop {
             self.handle_queue_irq(selector);
 
