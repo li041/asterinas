@@ -15,7 +15,7 @@ use ostd::{
     sync::SpinLock,
 };
 
-use crate::dma_buf::DmaBuf;
+use crate::{device::VirtioDeviceError, dma_buf::DmaBuf};
 
 const SIZE_CLASSES: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096];
 const POOL_INIT_SIZE: usize = 8;
@@ -48,56 +48,56 @@ impl FsDmaPools {
         })
     }
 
-    pub fn alloc_to_device(self: &Arc<Self>, required_len: usize) -> FsDmaBuf {
-        let class = SIZE_CLASSES.iter().find(|&&size| size >= required_len);
-
-        let storage = if let Some(class_size) = class {
-            let pool = self
-                .to_device_pools
-                .disable_irq()
-                .lock()
-                .get(&class_size)
-                .unwrap()
-                .clone();
-            FsDmaStorage::ToSegment(pool.alloc_segment().unwrap())
-        } else {
-            // For buffers larger than the largest size class,
-            // we directly allocate a stream instead of trying to fit it into a pool segment.
-            FsDmaStorage::Stream(Arc::new(
-                DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false).unwrap(),
-            ))
+    pub fn alloc_to_device(
+        self: &Arc<Self>,
+        required_len: usize,
+    ) -> core::result::Result<FsDmaBuf, VirtioDeviceError> {
+        let Some(&class_size) = SIZE_CLASSES.iter().find(|&&size| size >= required_len) else {
+            let stream = DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false)
+                .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+            return Ok(FsDmaBuf {
+                storage: Arc::new(FsDmaStorage::Stream(Arc::new(stream))),
+                required_len,
+            });
         };
 
-        FsDmaBuf {
-            storage: Arc::new(storage),
+        let segment = {
+            let pools = self.to_device_pools.disable_irq().lock();
+            let pool = pools.get(&class_size).unwrap();
+            pool.alloc_segment()
+                .map_err(|_| VirtioDeviceError::QueueUnknownError)
+        }?;
+
+        Ok(FsDmaBuf {
+            storage: Arc::new(FsDmaStorage::ToSegment(segment)),
             required_len,
-        }
+        })
     }
 
-    pub fn alloc_from_device(self: &Arc<Self>, required_len: usize) -> FsDmaBuf {
-        let class = SIZE_CLASSES.iter().find(|&&size| size >= required_len);
-
-        let storage = if let Some(class_size) = class {
-            let pool = self
-                .from_device_pools
-                .disable_irq()
-                .lock()
-                .get(&class_size)
-                .unwrap()
-                .clone();
-            FsDmaStorage::FromSegment(pool.alloc_segment().unwrap())
-        } else {
-            // For buffers larger than the largest size class,
-            // we directly allocate a stream instead of trying to fit it into a pool segment.
-            FsDmaStorage::Stream(Arc::new(
-                DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false).unwrap(),
-            ))
+    pub fn alloc_from_device(
+        self: &Arc<Self>,
+        required_len: usize,
+    ) -> core::result::Result<FsDmaBuf, VirtioDeviceError> {
+        let Some(&class_size) = SIZE_CLASSES.iter().find(|&&size| size >= required_len) else {
+            let stream = DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false)
+                .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+            return Ok(FsDmaBuf {
+                storage: Arc::new(FsDmaStorage::Stream(Arc::new(stream))),
+                required_len,
+            });
         };
 
-        FsDmaBuf {
-            storage: Arc::new(storage),
+        let segment = {
+            let pools = self.from_device_pools.disable_irq().lock();
+            let pool = pools.get(&class_size).unwrap();
+            pool.alloc_segment()
+                .map_err(|_| VirtioDeviceError::QueueUnknownError)
+        }?;
+
+        Ok(FsDmaBuf {
+            storage: Arc::new(FsDmaStorage::FromSegment(segment)),
             required_len,
-        }
+        })
     }
 }
 
