@@ -13,6 +13,7 @@ use crate::{
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
+    thread::work_queue::{WorkPriority, submit_work_func},
 };
 
 pub(super) struct VirtioFsHandle {
@@ -35,14 +36,23 @@ impl VirtioFsHandle {
 
 impl Drop for VirtioFsHandle {
     fn drop(&mut self) {
-        if self.cache_enabled {
-            let _ = self.inode.flush_page_cache();
-        }
-        if let Some(fs) = self.inode.try_fs_ref() {
-            let _ = fs
-                .device
-                .fuse_release(self.inode.nodeid(), self.fh, self.flags);
-        }
+        let inode = self.inode.clone();
+        let fh = self.fh;
+        let flags = self.flags;
+        let cache_enabled = self.cache_enabled;
+
+        submit_work_func(
+            move || {
+                if cache_enabled {
+                    let _ = inode.flush_page_cache();
+                }
+
+                if let Some(fs) = inode.try_fs_ref() {
+                    let _ = fs.device.fuse_release(inode.nodeid(), fh, flags);
+                }
+            },
+            WorkPriority::Normal,
+        );
     }
 }
 
