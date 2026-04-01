@@ -18,6 +18,7 @@ use device_id::DeviceId;
 use self::inode::VirtioFsInode;
 use crate::{
     fs::{
+        utils::NAME_MAX,
         vfs::{
             file_system::{FileSystem, FsEventSubscriberStats, FsFlags, SuperBlock},
             inode::{Inode, Metadata},
@@ -30,7 +31,6 @@ use crate::{
 
 const VIRTIOFS_MAGIC: u64 = 0x6573_5546;
 const BLOCK_SIZE: usize = 4096;
-const NAME_MAX: usize = 255;
 pub(super) const S_IFREG: u32 = 0o100000;
 pub(super) const S_IFDIR: u32 = 0o040000;
 pub(super) const S_IFSOCK: u32 = 0o140000;
