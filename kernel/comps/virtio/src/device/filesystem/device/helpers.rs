@@ -19,14 +19,6 @@ impl FileSystemDevice {
         self.unique_id_alloc.alloc() as u64
     }
 
-    fn alloc_to_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
-        self.dma_pools.alloc_to_device(size)
-    }
-
-    fn alloc_from_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
-        self.dma_pools.alloc_from_device(size)
-    }
-
     pub(super) fn prepare_in_header_buf(
         &self,
         in_header: InHeader,
@@ -137,5 +129,13 @@ impl FileSystemDevice {
             out_header_slice,
             out_payload_slice,
         ))
+    }
+
+    fn alloc_to_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
+        self.dma_pools.alloc_to_device(size)
+    }
+
+    fn alloc_from_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
+        self.dma_pools.alloc_from_device(size)
     }
 }
