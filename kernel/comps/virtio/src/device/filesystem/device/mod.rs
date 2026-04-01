@@ -58,12 +58,14 @@ struct RequestWaitState {
 }
 
 struct FsRequest {
+    _buffers: Vec<FsDmaBuf>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
 impl FsRequest {
-    fn new() -> Arc<Self> {
+    fn new(buffers: Vec<FsDmaBuf>) -> Arc<Self> {
         Arc::new(Self {
+            _buffers: buffers,
             wait_state: SpinLock::new(RequestWaitState {
                 completed: false,
                 waker: None,

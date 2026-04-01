@@ -147,7 +147,12 @@ impl FileSystemDevice {
         out_slices: &[&Slice<FsDmaBuf>],
     ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
         let queue = self.queue(selector);
-        let request = FsRequest::new();
+        let buffers = in_slices
+            .iter()
+            .chain(out_slices.iter())
+            .map(|slice| slice.mem_obj().clone())
+            .collect();
+        let request = FsRequest::new(buffers);
 
         {
             let mut virt_queue = queue.queue.lock();
