@@ -44,8 +44,6 @@ use crate::{
     vm::vmo::Vmo,
 };
 
-const PAGE_SIZE: usize = 4096;
-
 pub(super) struct VirtioFsInode {
     this: Weak<VirtioFsInode>,
     nodeid: AtomicU64,
