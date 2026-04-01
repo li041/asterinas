@@ -365,7 +365,7 @@ impl VirtioFsInode {
         ))
     }
 
-    fn apply_setattr(&self, setattr_in: SetattrIn) -> Result<()> {
+    fn setattr(&self, setattr_in: SetattrIn) -> Result<()> {
         let fs = self.fs_ref();
         let attr_out = fs
             .device
@@ -497,7 +497,7 @@ impl Inode for VirtioFsInode {
             size,
             ..SetattrIn::default()
         };
-        self.apply_setattr(setattr_in)
+        self.setattr(setattr_in)
     }
 
     fn metadata(&self) -> Metadata {
@@ -523,7 +523,7 @@ impl Inode for VirtioFsInode {
             mode: mode_bits,
             ..SetattrIn::default()
         };
-        self.apply_setattr(setattr_in)
+        self.setattr(setattr_in)
     }
 
     fn owner(&self) -> Result<Uid> {
@@ -536,7 +536,7 @@ impl Inode for VirtioFsInode {
             uid: uid.into(),
             ..SetattrIn::default()
         };
-        self.apply_setattr(setattr_in)
+        self.setattr(setattr_in)
     }
 
     fn group(&self) -> Result<Gid> {
@@ -549,7 +549,7 @@ impl Inode for VirtioFsInode {
             gid: gid.into(),
             ..SetattrIn::default()
         };
-        self.apply_setattr(setattr_in)
+        self.setattr(setattr_in)
     }
 
     fn atime(&self) -> Duration {
@@ -563,7 +563,7 @@ impl Inode for VirtioFsInode {
             atimensec: time.subsec_nanos(),
             ..SetattrIn::default()
         };
-        if let Err(err) = self.apply_setattr(setattr_in) {
+        if let Err(err) = self.setattr(setattr_in) {
             warn!(
                 "virtiofs set_atime failed for inode {}: {:?}",
                 self.nodeid(),
@@ -583,7 +583,7 @@ impl Inode for VirtioFsInode {
             mtimensec: time.subsec_nanos(),
             ..SetattrIn::default()
         };
-        if let Err(err) = self.apply_setattr(setattr_in) {
+        if let Err(err) = self.setattr(setattr_in) {
             warn!(
                 "virtiofs set_mtime failed for inode {}: {:?}",
                 self.nodeid(),
@@ -603,7 +603,7 @@ impl Inode for VirtioFsInode {
             ctimensec: time.subsec_nanos(),
             ..SetattrIn::default()
         };
-        if let Err(err) = self.apply_setattr(setattr_in) {
+        if let Err(err) = self.setattr(setattr_in) {
             warn!(
                 "virtiofs set_ctime failed for inode {}: {:?}",
                 self.nodeid(),
