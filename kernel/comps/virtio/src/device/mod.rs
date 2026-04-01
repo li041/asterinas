@@ -47,6 +47,8 @@ pub enum VirtioDeviceError {
     QueuesAmountDoNotMatch(u16, u16),
     /// unknown error of queue
     QueueUnknownError,
+    /// Request IDs have been exhausted
+    RequestIdExhausted,
     /// filesystem request failed with a FUSE negative errno value
     FileSystemError(i32),
     /// The input virtio capability list contains invalid element

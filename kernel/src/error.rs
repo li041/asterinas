@@ -263,6 +263,9 @@ impl From<VirtioDeviceError> for Error {
             VirtioDeviceError::QueueUnknownError => {
                 Error::with_message(Errno::EIO, "Unknown error of queue")
             }
+            VirtioDeviceError::RequestIdExhausted => {
+                Error::with_message(Errno::EOVERFLOW, "Request IDs are exhausted")
+            }
             VirtioDeviceError::FileSystemError(code) => {
                 let errno = match code {
                     -1 | 1 => Errno::EPERM,

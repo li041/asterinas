@@ -16,7 +16,7 @@ impl FileSystemDevice {
     }
 
     pub(super) fn alloc_unique(&self) -> u64 {
-        self.unique_id_alloc.alloc() as u64
+        self.next_unique.fetch_add(1, Ordering::Relaxed)
     }
 
     pub(super) fn prepare_in_header_buf(

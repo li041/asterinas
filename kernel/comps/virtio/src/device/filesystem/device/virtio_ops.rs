@@ -54,7 +54,7 @@ impl FileSystemDevice {
             hiprio_queue,
             request_queues,
             dma_pools,
-            unique_id_alloc: SyncIdAlloc::with_capacity(UNIQUE_ID_ALLOC_CAPACITY),
+            next_unique: AtomicU64::new(0),
             tag,
             notify_supported,
         });
@@ -145,25 +145,37 @@ impl FileSystemDevice {
         unique: u64,
         in_slices: &[&Slice<FsDmaBuf>],
         out_slices: &[&Slice<FsDmaBuf>],
-    ) -> Result<(), VirtioDeviceError> {
+    ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
         let queue = self.queue(selector);
+        let request = FsRequest::new();
 
         {
             let mut virt_queue = queue.queue.lock();
 
             let token = virt_queue.add_dma_buf(in_slices, out_slices)?;
+            let token_idx = token as usize;
 
-            queue
-                .pending_requests
-                .disable_irq()
-                .lock()
-                .insert(token, unique as usize);
+            let mut in_flight_requests = queue.in_flight_requests.lock();
+            let Some(slot) = in_flight_requests.get_mut(token_idx) else {
+                warn!(
+                    "{} returned an out-of-range token: queue={:?}, token={}, unique={}",
+                    DEVICE_NAME, selector, token, unique
+                );
+                return Err(VirtioDeviceError::QueueUnknownError);
+            };
+            if slot.replace(request.clone()).is_some() {
+                warn!(
+                    "{} unexpectedly reused an in-flight token: queue={:?}, token={}, unique={}",
+                    DEVICE_NAME, selector, token, unique
+                );
+                return Err(VirtioDeviceError::QueueUnknownError);
+            }
 
             if virt_queue.should_notify() {
                 virt_queue.notify();
             }
         }
-        Ok(())
+        Ok(request)
     }
 
     pub(super) fn submit_request_and_wait(
@@ -173,8 +185,8 @@ impl FileSystemDevice {
         in_slices: &[&Slice<FsDmaBuf>],
         out_slices: &[&Slice<FsDmaBuf>],
     ) -> Result<(), VirtioDeviceError> {
-        self.submit_request(selector, unique, in_slices, out_slices)?;
-        self.wait_for_unique(selector, unique as usize)
+        let request = self.submit_request(selector, unique, in_slices, out_slices)?;
+        self.wait_for_request(&request)
     }
 
     pub(super) fn check_reply(
@@ -214,23 +226,22 @@ impl FileSystemDevice {
                 }
             };
 
-            let Some(pending) = queue_state
-                .pending_requests
-                .disable_irq()
-                .lock()
-                .remove(&token)
-            else {
+            let mut in_flight_requests = queue_state.in_flight_requests.lock();
+            let Some(slot) = in_flight_requests.get_mut(token as usize) else {
+                warn!(
+                    "{} completed an out-of-range token: queue={:?}, token={}",
+                    DEVICE_NAME, selector, token
+                );
+                continue;
+            };
+            let Some(request) = slot.take() else {
                 continue;
             };
 
             let waker = {
-                let mut request_states = queue_state.request_states.disable_irq().lock();
-                let request_state = request_states.entry(pending).or_insert(RequestWaitState {
-                    completed: false,
-                    waker: None,
-                });
-                request_state.completed = true;
-                request_state.waker.take()
+                let mut wait_state = request.wait_state.lock();
+                wait_state.completed = true;
+                wait_state.waker.take()
             };
 
             if let Some(waker) = waker {
@@ -239,38 +250,18 @@ impl FileSystemDevice {
         }
     }
 
-    pub(super) fn wait_for_unique(
+    pub(super) fn wait_for_request(
         &self,
-        selector: QueueSelector,
-        unique: usize,
+        request: &Arc<FsRequest>,
     ) -> Result<(), VirtioDeviceError> {
-        let queue_state = self.queue(selector);
-
-        {
-            let mut request_states = queue_state.request_states.disable_irq().lock();
-            if let Some(state) = request_states.get(&unique)
-                && state.completed
-            {
-                request_states.remove(&unique);
-                self.unique_id_alloc.dealloc(unique);
-                return Ok(());
-            }
+        let mut wait_state = request.wait_state.lock();
+        if wait_state.completed {
+            return Ok(());
         }
 
         let (waiter, waker) = Waiter::new_pair();
-        {
-            let mut request_states = queue_state.request_states.disable_irq().lock();
-            let state = request_states.entry(unique).or_insert(RequestWaitState {
-                completed: false,
-                waker: None,
-            });
-            if state.completed {
-                request_states.remove(&unique);
-                self.unique_id_alloc.dealloc(unique);
-                return Ok(());
-            }
-            state.waker = Some(waker);
-        }
+        wait_state.waker = Some(waker);
+        drop(wait_state);
 
         let timeout_deadline = Jiffies::elapsed()
             .as_u64()
@@ -278,13 +269,8 @@ impl FileSystemDevice {
 
         let wait_res = waiter.wait_until_or_cancelled(
             || {
-                // TODO(high): Predicate 内部对 `request_states.disable_irq().lock()` 的持锁时间应极小。
-                // 确保 predicate 是非阻塞的，否则可能导致唤醒路径（IRQ）无法及时更新状态，出现 TOCTOU 或死锁。
-                let mut request_states = queue_state.request_states.disable_irq().lock();
-                if let Some(state) = request_states.get(&unique)
-                    && state.completed
-                {
-                    request_states.remove(&unique);
+                // Keep the predicate lock section short so IRQ completion can publish the state.
+                if request.wait_state.lock().completed {
                     return Some(());
                 }
                 None
@@ -299,40 +285,31 @@ impl FileSystemDevice {
         );
 
         if wait_res.is_ok() {
-            self.unique_id_alloc.dealloc(unique);
             return Ok(());
         }
 
-        let mut request_states = queue_state.request_states.disable_irq().lock();
-        if let Some(state) = request_states.get_mut(&unique) {
-            state.waker = None;
+        let mut wait_state = request.wait_state.lock();
+        if wait_state.completed {
+            return Ok(());
         }
-        request_states.remove(&unique);
-        self.unique_id_alloc.dealloc(unique);
+        wait_state.waker = None;
 
         Err(VirtioDeviceError::QueueUnknownError)
     }
 
     /// Wait for a reply from the device by spinning;
     /// intended for early boot or non-task contexts.
-    pub(super) fn wait_for_unique_early(
+    pub(super) fn wait_for_request_early(
         &self,
         selector: QueueSelector,
-        unique: usize,
+        request: &Arc<FsRequest>,
     ) -> Result<(), VirtioDeviceError> {
-        let queue_state = self.queue(selector);
-
         // TODO(high): 这是自旋等待版本，仅应在 early/非任务/不可睡眠上下文使用。
         // 在普通任务上下文误用会导致 CPU 忙等并损坏系统性能。
         loop {
             self.handle_queue_irq(selector);
 
-            let mut request_states = queue_state.request_states.disable_irq().lock();
-            if let Some(state) = request_states.get(&unique)
-                && state.completed
-            {
-                request_states.remove(&unique);
-                self.unique_id_alloc.dealloc(unique);
+            if request.wait_state.lock().completed {
                 return Ok(());
             }
 

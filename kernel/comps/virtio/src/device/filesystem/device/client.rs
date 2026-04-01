@@ -18,14 +18,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, init_in, size_of::<InitOut>())?;
 
         let selector = QueueSelector::Request(0);
-        self.submit_request(
+        let request = self.submit_request(
             selector,
             unique,
             &[&in_header_slice, &in_payload_slice],
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.wait_for_unique_early(selector, unique as usize)?;
+        self.wait_for_request_early(selector, &request)?;
 
         self.check_reply(&out_header_slice, unique, false)?;
 
@@ -754,8 +754,13 @@ impl FileSystemDevice {
         let in_header_slice = self.prepare_in_header_buf(in_header)?;
         let in_payload_slice = self.prepare_in_payload_buf(forget_in)?;
 
-        let selctor = QueueSelector::Hiprio;
-        self.submit_request(selctor, unique, &[&in_header_slice, &in_payload_slice], &[])?;
+        let selector = QueueSelector::Hiprio;
+        let _ = self.submit_request(
+            selector,
+            unique,
+            &[&in_header_slice, &in_payload_slice],
+            &[],
+        )?;
 
         Ok(())
     }

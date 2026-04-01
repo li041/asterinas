@@ -2,13 +2,17 @@
 
 use alloc::{
     boxed::Box,
-    collections::BTreeMap,
     string::{String, ToString},
     sync::Arc,
     vec,
     vec::Vec,
 };
-use core::{cmp, hint::spin_loop, mem::size_of};
+use core::{
+    cmp,
+    hint::spin_loop,
+    mem::size_of,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use aster_util::mem_obj_slice::Slice;
 use log::{debug, info, warn};
@@ -29,14 +33,12 @@ use super::{
 };
 use crate::{
     device::VirtioDeviceError,
-    id_alloc::SyncIdAlloc,
     queue::{QueueError, VirtQueue},
     transport::{VirtioTransport, VirtioTransportError},
 };
 
 const HIPRIO_QUEUE_INDEX: u16 = 0;
 const DEFAULT_QUEUE_SIZE: u16 = 128;
-const UNIQUE_ID_ALLOC_CAPACITY: usize = 4096;
 const REQUEST_WAIT_TIMEOUT_JIFFIES: u64 = 10 * TIMER_FREQ;
 const O_RDWR: u32 = 2;
 
@@ -55,18 +57,32 @@ struct RequestWaitState {
     waker: Option<Arc<Waker>>,
 }
 
+struct FsRequest {
+    wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
+}
+
+impl FsRequest {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            wait_state: SpinLock::new(RequestWaitState {
+                completed: false,
+                waker: None,
+            }),
+        })
+    }
+}
+
 struct FsRequestQueue {
     queue: SpinLock<VirtQueue, LocalIrqDisabled>,
-    pending_requests: SpinLock<BTreeMap<u16, usize>>,
-    request_states: SpinLock<BTreeMap<usize, RequestWaitState>>,
+    in_flight_requests: SpinLock<Vec<Option<Arc<FsRequest>>>, LocalIrqDisabled>,
 }
 
 impl FsRequestQueue {
     fn new(queue: VirtQueue) -> Self {
+        let queue_size = queue.available_desc();
         Self {
             queue: SpinLock::new(queue),
-            pending_requests: SpinLock::new(BTreeMap::new()),
-            request_states: SpinLock::new(BTreeMap::new()),
+            in_flight_requests: SpinLock::new(vec![None; queue_size]),
         }
     }
 }
@@ -76,12 +92,13 @@ impl core::fmt::Debug for FsRequestQueue {
         f.debug_struct("FsRequestQueue")
             .field("queue", &self.queue)
             .field(
-                "pending_requests_len",
-                &self.pending_requests.disable_irq().lock().len(),
-            )
-            .field(
-                "request_states_len",
-                &self.request_states.disable_irq().lock().len(),
+                "in_flight_requests_len",
+                &self
+                    .in_flight_requests
+                    .lock()
+                    .iter()
+                    .filter(|request| request.is_some())
+                    .count(),
             )
             .finish()
     }
@@ -98,7 +115,7 @@ pub struct FileSystemDevice {
     hiprio_queue: FsRequestQueue,
     request_queues: Vec<FsRequestQueue>,
     dma_pools: Arc<FsDmaPools>,
-    unique_id_alloc: SyncIdAlloc,
+    next_unique: AtomicU64,
     tag: String,
     notify_supported: bool,
 }
