@@ -31,12 +31,6 @@ use crate::{
 
 const VIRTIOFS_MAGIC: u64 = 0x6573_5546;
 const BLOCK_SIZE: usize = 4096;
-pub(super) const S_IFREG: u32 = 0o100000;
-pub(super) const S_IFDIR: u32 = 0o040000;
-pub(super) const S_IFSOCK: u32 = 0o140000;
-pub(super) const O_RDONLY: u32 = 0;
-pub(super) const O_WRONLY: u32 = 1;
-pub(super) const O_RDWR: u32 = 2;
 pub(super) const FUSE_READDIR_BUF_SIZE: u32 = 4096;
 
 pub(super) struct VirtioFsType;

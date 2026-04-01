@@ -8,7 +8,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<InitIn>()) as u32,
-            FUSE_OPCODE_INIT,
+            FuseOpcode::Init.into(),
             unique,
             0,
         );
@@ -58,7 +58,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + name.len() + 1) as u32,
-            FUSE_OPCODE_LOOKUP,
+            FuseOpcode::Lookup.into(),
             unique,
             parent_nodeid,
         );
@@ -98,7 +98,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<MkdirIn>() + name.len() + 1) as u32,
-            FUSE_OPCODE_MKDIR,
+            FuseOpcode::Mkdir.into(),
             unique,
             parent_nodeid,
         );
@@ -139,7 +139,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<MknodIn>() + name.len() + 1) as u32,
-            FUSE_OPCODE_MKNOD,
+            FuseOpcode::Mknod.into(),
             unique,
             parent_nodeid,
         );
@@ -174,7 +174,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + name.len() + 1) as u32,
-            FUSE_OPCODE_UNLINK,
+            FuseOpcode::Unlink.into(),
             unique,
             parent_nodeid,
         );
@@ -202,7 +202,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + name.len() + 1) as u32,
-            FUSE_OPCODE_RMDIR,
+            FuseOpcode::Rmdir.into(),
             unique,
             parent_nodeid,
         );
@@ -234,7 +234,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<CreateIn>() + name.len() + 1) as u32,
-            FUSE_OPCODE_CREATE,
+            FuseOpcode::Create.into(),
             unique,
             parent_nodeid,
         );
@@ -273,7 +273,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<GetattrIn>()) as u32,
-            FUSE_OPCODE_GETATTR,
+            FuseOpcode::Getattr.into(),
             unique,
             nodeid,
         );
@@ -309,7 +309,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<SetattrIn>()) as u32,
-            FUSE_OPCODE_SETATTR,
+            FuseOpcode::Setattr.into(),
             unique,
             nodeid,
         );
@@ -339,7 +339,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
-            FUSE_OPCODE_OPENDIR,
+            FuseOpcode::Opendir.into(),
             unique,
             nodeid,
         );
@@ -378,7 +378,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReadIn>()) as u32,
-            FUSE_OPCODE_READDIR,
+            FuseOpcode::Readdir.into(),
             unique,
             nodeid,
         );
@@ -446,7 +446,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
-            FUSE_OPCODE_RELEASEDIR,
+            FuseOpcode::Releasedir.into(),
             unique,
             nodeid,
         );
@@ -475,7 +475,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             size_of::<InHeader>() as u32,
-            FUSE_OPCODE_READLINK,
+            FuseOpcode::Readlink.into(),
             unique,
             nodeid,
         );
@@ -521,7 +521,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<LinkIn>() + new_name.len() + 1) as u32,
-            FUSE_OPCODE_LINK,
+            FuseOpcode::Link.into(),
             unique,
             new_parent_nodeid,
         );
@@ -554,7 +554,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
-            FUSE_OPCODE_OPEN,
+            FuseOpcode::Open.into(),
             unique,
             nodeid,
         );
@@ -587,7 +587,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
-            FUSE_OPCODE_RELEASE,
+            FuseOpcode::Release.into(),
             unique,
             nodeid,
         );
@@ -621,7 +621,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<LseekIn>()) as u32,
-            FUSE_OPCODE_LSEEK,
+            FuseOpcode::Lseek.into(),
             unique,
             nodeid,
         );
@@ -660,7 +660,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ReadIn>()) as u32,
-            FUSE_OPCODE_READ,
+            FuseOpcode::Read.into(),
             unique,
             nodeid,
         );
@@ -706,7 +706,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<WriteIn>() + data.len()) as u32,
-            FUSE_OPCODE_WRITE,
+            FuseOpcode::Write.into(),
             unique,
             nodeid,
         );
@@ -745,7 +745,7 @@ impl FileSystemDevice {
 
         let in_header = InHeader::new(
             (size_of::<InHeader>() + size_of::<ForgetIn>()) as u32,
-            FUSE_OPCODE_FORGET,
+            FuseOpcode::Forget.into(),
             unique,
             nodeid,
         );

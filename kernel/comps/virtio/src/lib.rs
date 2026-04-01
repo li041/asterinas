@@ -17,13 +17,9 @@ use aster_block::MajorIdOwner;
 use bitflags::bitflags;
 use component::{ComponentInitError, init_component};
 use device::{
-    VirtioDeviceType,
-    block::device::BlockDevice,
-    console::device::ConsoleDevice,
-    filesystem::device::FileSystemDevice,
-    input::device::InputDevice,
-    network::device::NetworkDevice,
-    socket::device::SocketDevice,
+    VirtioDeviceType, block::device::BlockDevice, console::device::ConsoleDevice,
+    filesystem::device::FileSystemDevice, input::device::InputDevice,
+    network::device::NetworkDevice, socket::device::SocketDevice,
 };
 use log::{error, warn};
 use spin::Once;

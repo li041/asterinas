@@ -23,10 +23,7 @@ use ostd::{
     sync::RwLock,
 };
 
-use super::{
-    FUSE_READDIR_BUF_SIZE, O_RDONLY, O_RDWR, O_WRONLY, S_IFDIR, S_IFREG, S_IFSOCK, VirtioFs,
-    handle::VirtioFsHandle, valid_duration,
-};
+use super::{FUSE_READDIR_BUF_SIZE, VirtioFs, handle::VirtioFsHandle, valid_duration};
 use crate::{
     fs::{
         file::{AccessMode, FileIo, InodeMode, InodeType, StatusFlags},
@@ -132,7 +129,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let open_out = fs
             .device
-            .fuse_open(self.nodeid(), O_RDWR)
+            .fuse_open(self.nodeid(), AccessMode::O_RDWR.into())
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page cache open failed"))?;
         *fh_slot = Some(open_out.fh);
         Ok(open_out.fh)
@@ -144,7 +141,9 @@ impl VirtioFsInode {
         };
 
         if let Some(fh) = self.page_cache_fh.lock().take() {
-            let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDWR);
+            let _ = fs
+                .device
+                .fuse_release(self.nodeid(), fh, AccessMode::O_RDWR.into());
         }
     }
 
@@ -267,13 +266,15 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let data = fs
             .device
-            .fuse_open(self.nodeid(), O_RDONLY)
+            .fuse_open(self.nodeid(), AccessMode::O_RDONLY.into())
             .and_then(|fh_out| {
                 let fh = fh_out.fh;
                 let result = fs
                     .device
                     .fuse_read(self.nodeid(), fh, start as u64, max_len as u32);
-                let _ = fs.device.fuse_release(self.nodeid(), fh, O_RDONLY);
+                let _ = fs
+                    .device
+                    .fuse_release(self.nodeid(), fh, AccessMode::O_RDONLY.into());
                 result
             })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs read failed"))?;
@@ -311,13 +312,15 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let written = fs
             .device
-            .fuse_open(self.nodeid(), O_WRONLY)
+            .fuse_open(self.nodeid(), AccessMode::O_WRONLY.into())
             .and_then(|fh_out| {
                 let fh = fh_out.fh;
                 let result = fs
                     .device
                     .fuse_write(self.nodeid(), fh, offset as u64, &data);
-                let _ = fs.device.fuse_release(self.nodeid(), fh, O_WRONLY);
+                let _ = fs
+                    .device
+                    .fuse_release(self.nodeid(), fh, AccessMode::O_WRONLY.into());
                 result
             })
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs write failed"))?;
@@ -335,11 +338,7 @@ impl VirtioFsInode {
     }
 
     fn open_handle(&self, access_mode: AccessMode) -> Result<VirtioFsHandle> {
-        let flags = match access_mode {
-            AccessMode::O_RDONLY => O_RDONLY,
-            AccessMode::O_WRONLY => O_WRONLY,
-            AccessMode::O_RDWR => O_RDWR,
-        };
+        let flags = u32::from(access_mode);
 
         let fs = self.fs_ref();
         let open_out = fs
@@ -518,7 +517,7 @@ impl Inode for VirtioFsInode {
     }
 
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
-        let mode_bits = (self.type_() as u32) | u32::from(mode.bits());
+        let mode_bits = u32::from(self.type_()) | u32::from(mode.bits());
         let setattr_in = SetattrIn {
             valid: FATTR_MODE,
             mode: mode_bits,
@@ -682,21 +681,34 @@ impl Inode for VirtioFsInode {
             InodeType::File => {
                 let (entry_out, open_out) = fs
                     .device
-                    .fuse_create(parent_nodeid, name, S_IFREG | mode.bits() as u32)
+                    .fuse_create(
+                        parent_nodeid,
+                        name,
+                        u32::from(InodeType::File) | u32::from(mode.bits()),
+                    )
                     .map_err(Error::from)?;
                 (entry_out, Some(open_out))
             }
             InodeType::Dir => {
                 let entry_out = fs
                     .device
-                    .fuse_mkdir(parent_nodeid, name, S_IFDIR | mode.bits() as u32)
+                    .fuse_mkdir(
+                        parent_nodeid,
+                        name,
+                        u32::from(InodeType::Dir) | u32::from(mode.bits()),
+                    )
                     .map_err(Error::from)?;
                 (entry_out, None)
             }
             InodeType::Socket => {
                 let entry_out = fs
                     .device
-                    .fuse_mknod(parent_nodeid, name, S_IFSOCK | mode.bits() as u32, 0)
+                    .fuse_mknod(
+                        parent_nodeid,
+                        name,
+                        u32::from(InodeType::Socket) | u32::from(mode.bits()),
+                        0,
+                    )
                     .map_err(Error::from)?;
                 (entry_out, None)
             }
@@ -713,9 +725,9 @@ impl Inode for VirtioFsInode {
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs getattr after create failed"))?;
 
         if let Some(open_out) = open_out_opt {
-            let _ = fs
-                .device
-                .fuse_release(entry_out.nodeid, open_out.fh, O_RDWR);
+            let _ =
+                fs.device
+                    .fuse_release(entry_out.nodeid, open_out.fh, AccessMode::O_RDWR.into());
         }
 
         let now = MonotonicCoarseClock::get().read_time();

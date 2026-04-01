@@ -447,28 +447,13 @@ pub enum FuseOpcode {
     Tmpfile = 51,
 }
 
-pub const FUSE_ROOT_ID: u64 = 1;
+impl From<FuseOpcode> for u32 {
+    fn from(opcode: FuseOpcode) -> u32 {
+        opcode as u32
+    }
+}
 
-pub const FUSE_OPCODE_LOOKUP: u32 = FuseOpcode::Lookup as u32;
-pub const FUSE_OPCODE_FORGET: u32 = FuseOpcode::Forget as u32;
-pub const FUSE_OPCODE_GETATTR: u32 = FuseOpcode::Getattr as u32;
-pub const FUSE_OPCODE_SETATTR: u32 = FuseOpcode::Setattr as u32;
-pub const FUSE_OPCODE_INIT: u32 = FuseOpcode::Init as u32;
-pub const FUSE_OPCODE_OPEN: u32 = FuseOpcode::Open as u32;
-pub const FUSE_OPCODE_READ: u32 = FuseOpcode::Read as u32;
-pub const FUSE_OPCODE_WRITE: u32 = FuseOpcode::Write as u32;
-pub const FUSE_OPCODE_RELEASE: u32 = FuseOpcode::Release as u32;
-pub const FUSE_OPCODE_CREATE: u32 = FuseOpcode::Create as u32;
-pub const FUSE_OPCODE_MKNOD: u32 = FuseOpcode::Mknod as u32;
-pub const FUSE_OPCODE_MKDIR: u32 = FuseOpcode::Mkdir as u32;
-pub const FUSE_OPCODE_UNLINK: u32 = FuseOpcode::Unlink as u32;
-pub const FUSE_OPCODE_RMDIR: u32 = FuseOpcode::Rmdir as u32;
-pub const FUSE_OPCODE_READLINK: u32 = FuseOpcode::Readlink as u32;
-pub const FUSE_OPCODE_LINK: u32 = FuseOpcode::Link as u32;
-pub const FUSE_OPCODE_OPENDIR: u32 = FuseOpcode::Opendir as u32;
-pub const FUSE_OPCODE_READDIR: u32 = FuseOpcode::Readdir as u32;
-pub const FUSE_OPCODE_RELEASEDIR: u32 = FuseOpcode::Releasedir as u32;
-pub const FUSE_OPCODE_LSEEK: u32 = FuseOpcode::Lseek as u32;
+pub const FUSE_ROOT_ID: u64 = 1;
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
