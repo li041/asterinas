@@ -40,6 +40,7 @@ use crate::{
     },
     prelude::*,
     process::{Gid, Uid},
+    thread::work_queue::{WorkPriority, submit_work_func},
     time::clocks::MonotonicCoarseClock,
     vm::vmo::Vmo,
 };
@@ -101,14 +102,25 @@ impl VirtioFsInode {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn release_lookup_count(&self) {
-        let nlookup = self.lookup_count.swap(0, Ordering::Relaxed);
-
-        let Some(fs) = self.fs.upgrade() else {
+    fn release_lookup_count(&self, nlookup: u64) {
+        if nlookup == 0 {
             return;
-        };
+        }
 
-        let _ = fs.device.fuse_forget(self.nodeid(), nlookup);
+        self.forget_async(nlookup);
+    }
+
+    fn forget_async(&self, nlookup: u64) {
+        let nodeid = self.nodeid();
+
+        if let Some(fs) = self.fs.upgrade() {
+            submit_work_func(
+                move || {
+                    let _ = fs.device.fuse_forget(nodeid, nlookup);
+                },
+                WorkPriority::Normal,
+            );
+        }
     }
 
     fn get_or_open_page_cache_fh(&self) -> Result<u64> {
@@ -152,11 +164,16 @@ impl VirtioFsInode {
             .device
             .fuse_lookup(parent_nodeid, name)
             .map_err(Error::from)?;
-        self.increase_lookup_count();
 
         if entry_out.nodeid != old_nodeid {
+            // The returned entry refers to a different inode. Drop the lookup
+            // reference immediately so we don't leak nlookup on that node.
+            let _ = fs.device.fuse_forget(entry_out.nodeid, 1);
             return_errno_with_message!(Errno::ENOENT, "virtiofs stale dentry after revalidate");
         }
+
+        // Count only lookups that still point to this inode.
+        self.increase_lookup_count();
 
         *self.metadata.write() = Metadata::from(entry_out.attr);
 
@@ -376,7 +393,8 @@ impl VirtioFsInode {
 impl Drop for VirtioFsInode {
     fn drop(&mut self) {
         self.release_page_cache_fh();
-        self.release_lookup_count();
+        let nlookup = self.lookup_count.load(Ordering::Relaxed);
+        self.release_lookup_count(nlookup);
     }
 }
 
