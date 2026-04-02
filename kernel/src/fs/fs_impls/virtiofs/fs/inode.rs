@@ -134,7 +134,7 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let open_out = fs
             .device
-            .fuse_open(self.nodeid(), AccessMode::O_RDWR.into())
+            .fuse_open(self.nodeid(), AccessMode::O_RDWR as u32)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs page cache open failed"))?;
         *fh_slot = Some(open_out.fh);
         Ok(open_out.fh)
@@ -148,7 +148,7 @@ impl VirtioFsInode {
         if let Some(fh) = self.page_cache_fh.lock().take() {
             let _ = fs
                 .device
-                .fuse_release(self.nodeid(), fh, AccessMode::O_RDWR.into());
+                .fuse_release(self.nodeid(), fh, AccessMode::O_RDWR as u32);
         }
     }
 
@@ -347,7 +347,7 @@ impl VirtioFsInode {
     }
 
     fn open_handle(&self, access_mode: AccessMode) -> Result<VirtioFsHandle> {
-        let flags = u32::from(access_mode);
+        let flags = access_mode as u32;
 
         let fs = self.fs_ref();
         let open_out = fs
@@ -466,13 +466,13 @@ impl InodeIo for VirtioFsInode {
         let fs = self.fs_ref();
         let fh = fs
             .device
-            .fuse_open(self.nodeid(), AccessMode::O_RDONLY.into())
+            .fuse_open(self.nodeid(), AccessMode::O_RDONLY as u32)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs read failed"))?
             .fh;
         let result = self.cached_read_at(offset, writer, fh);
         let _ = fs
             .device
-            .fuse_release(self.nodeid(), fh, AccessMode::O_RDONLY.into());
+            .fuse_release(self.nodeid(), fh, AccessMode::O_RDONLY as u32);
         result
     }
 
@@ -497,13 +497,13 @@ impl InodeIo for VirtioFsInode {
         let fs = self.fs_ref();
         let fh = fs
             .device
-            .fuse_open(self.nodeid(), AccessMode::O_WRONLY.into())
+            .fuse_open(self.nodeid(), AccessMode::O_WRONLY as u32)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs write failed"))?
             .fh;
         let result = self.cached_write_at(offset, reader, fh);
         let _ = fs
             .device
-            .fuse_release(self.nodeid(), fh, AccessMode::O_WRONLY.into());
+            .fuse_release(self.nodeid(), fh, AccessMode::O_WRONLY as u32);
         result
     }
 }
@@ -756,7 +756,7 @@ impl Inode for VirtioFsInode {
         if let Some(open_out) = open_out_opt {
             let _ =
                 fs.device
-                    .fuse_release(entry_out.nodeid, open_out.fh, AccessMode::O_RDWR.into());
+                    .fuse_release(entry_out.nodeid, open_out.fh, AccessMode::O_RDWR as u32);
         }
 
         let now = MonotonicCoarseClock::get().read_time();
