@@ -58,7 +58,7 @@ fn send_parent_death_signal(current_process: &Process) {
 ///
 /// If there is no reaper process for `current_process`, returns `None`.
 fn find_reaper_process(current_process: &Process) -> Option<Arc<Process>> {
-    let mut parent = current_process.parent().lock().process().upgrade().unwrap();
+    let mut parent = current_process.parent().lock().process().upgrade()?;
 
     loop {
         if parent.is_init_process() {
@@ -81,9 +81,17 @@ fn find_reaper_process(current_process: &Process) -> Option<Arc<Process>> {
         } else {
             // If both the parent and grandparent have exited concurrently, we will lose the clue
             // about the ancestor processes. Therefore, we have to retry.
-            parent = current_process.parent().lock().process().upgrade().unwrap();
+            parent = current_process.parent().lock().process().upgrade()?;
         }
     }
+}
+
+fn get_init_process() -> Arc<Process> {
+    const INIT_PROCESS_PID: Pid = 1;
+
+    pid_table::pid_table_mut()
+        .get_process(INIT_PROCESS_PID)
+        .unwrap()
 }
 
 /// Moves the children of `current_process` to be the children of `reaper_process`.
@@ -128,18 +136,37 @@ fn move_children_to_reaper_process(current_process: &Process) {
         }
     }
 
-    const INIT_PROCESS_PID: Pid = 1;
-
-    let init_process = pid_table::pid_table_mut()
-        .get_process(INIT_PROCESS_PID)
-        .unwrap();
+    let init_process = get_init_process();
     move_process_children(current_process, &init_process).unwrap();
     init_process.children_wait_queue().wake_all();
 }
 
+/// Resolves which process should receive the exiting process's child-death signal.
+fn child_death_signal_recipient(current_process: &Process) -> Option<Arc<Process>> {
+    let parent = current_process.parent().lock().process().upgrade()?;
+    if !parent.status().is_zombie() {
+        return Some(parent);
+    }
+
+    // A waited zombie can still be finishing its exit path and reparenting
+    // `current_process`. Wait until that operation finishes before reading the
+    // parent again, otherwise the signal may be sent to the stale zombie
+    // parent and get lost.
+    drop(parent.children().lock());
+
+    let Some(parent) = current_process.parent().lock().process().upgrade() else {
+        return Some(get_init_process());
+    };
+    if !parent.status().is_zombie() {
+        return Some(parent);
+    }
+
+    Some(find_reaper_process(current_process).unwrap_or_else(get_init_process))
+}
+
 /// Sends a child-death signal to the parent.
 fn send_child_death_signal(current_process: &Process) {
-    let Some(parent) = current_process.parent().lock().process().upgrade() else {
+    let Some(parent) = child_death_signal_recipient(current_process) else {
         return;
     };
 
