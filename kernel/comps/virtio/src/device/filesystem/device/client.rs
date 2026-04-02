@@ -27,7 +27,7 @@ impl FileSystemDevice {
 
         self.wait_for_request_early(selector, &request)?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -77,7 +77,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -117,7 +117,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -158,7 +158,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -192,7 +192,7 @@ impl FileSystemDevice {
             &[&out_header_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         Ok(())
     }
@@ -219,7 +219,7 @@ impl FileSystemDevice {
             &[&out_header_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         Ok(())
     }
@@ -256,7 +256,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -290,7 +290,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -324,7 +324,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -356,7 +356,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -396,7 +396,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique, false)?;
+        let out_header = self.check_reply(&out_header_slice, unique)?;
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         let payload_len = cmp::min(payload_len, out_payload_size);
         out_payload_slice
@@ -464,7 +464,7 @@ impl FileSystemDevice {
             &[&out_header_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         Ok(())
     }
@@ -492,7 +492,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique, false)?;
+        let out_header = self.check_reply(&out_header_slice, unique)?;
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         out_payload_slice
             .mem_obj()
@@ -539,7 +539,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -571,7 +571,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -605,7 +605,7 @@ impl FileSystemDevice {
             &[&out_header_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, true)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         Ok(())
     }
@@ -638,7 +638,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()
@@ -678,7 +678,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique, false)?;
+        let out_header = self.check_reply(&out_header_slice, unique)?;
 
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         let payload_len = cmp::min(payload_len, out_payload_size);
@@ -725,7 +725,7 @@ impl FileSystemDevice {
             &[&out_header_slice, &out_payload_slice],
         )?;
 
-        self.check_reply(&out_header_slice, unique, false)?;
+        self.check_reply(&out_header_slice, unique)?;
 
         out_payload_slice
             .mem_obj()

@@ -198,22 +198,25 @@ impl FileSystemDevice {
         &self,
         out_header_slice: &Slice<FsDmaBuf>,
         unique: u64,
-        map_fs_error: bool,
     ) -> Result<OutHeader, VirtioDeviceError> {
         out_header_slice
             .mem_obj()
             .sync_from_device(out_header_slice.offset().clone())
             .unwrap();
         let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique || out_header.error != 0 {
+        if out_header.unique != unique {
             warn!(
                 "{} failed: unique={}, error={}, out_len={}",
                 DEVICE_NAME, out_header.unique, out_header.error, out_header.len
             );
-            if map_fs_error && out_header.unique == unique && out_header.error != 0 {
-                return Err(VirtioDeviceError::FileSystemError(out_header.error));
-            }
             return Err(VirtioDeviceError::QueueUnknownError);
+        }
+        if out_header.error != 0 {
+            warn!(
+                "{} failed: unique={}, error={}, out_len={}",
+                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
+            );
+            return Err(VirtioDeviceError::FileSystemError(out_header.error));
         }
 
         Ok(out_header)
