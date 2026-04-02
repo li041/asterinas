@@ -51,16 +51,14 @@ impl_dma_buf_for!(<D> DmaStream<D>);
 impl_dma_buf_for!(<D> &DmaStream<D>);
 impl_dma_buf_for!(<D> Arc<DmaStream<D>>);
 impl_dma_buf_for!(<D> &Arc<DmaStream<D>>);
+impl_dma_buf_for!(<D> DmaSegment<D>);
+impl_dma_buf_for!(<D> &DmaSegment<D>);
+impl_dma_buf_for!(<D> Arc<DmaSegment<D>>);
+impl_dma_buf_for!(<D> &Arc<DmaSegment<D>>);
 impl_dma_buf_for!(DmaCoherent);
 impl_dma_buf_for!(&DmaCoherent);
 impl_dma_buf_for!(Arc<DmaCoherent>);
 impl_dma_buf_for!(&Arc<DmaCoherent>);
-
-impl<D: DmaDirection> DmaBuf for DmaSegment<D> {
-    fn len(&self) -> usize {
-        self.size()
-    }
-}
 
 impl DmaBuf for TxBuffer {
     fn len(&self) -> usize {

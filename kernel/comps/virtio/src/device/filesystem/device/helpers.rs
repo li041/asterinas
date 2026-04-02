@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use aster_network::dma_pool::DmaSegment;
+use ostd::mm::dma::DmaStream;
+
 use super::*;
 
 // (in_header, in_payload, out_header, out_payload)
 type FsRequestSlices = (
-    Slice<FsDmaBuf>,
-    Slice<FsDmaBuf>,
-    Slice<FsDmaBuf>,
-    Slice<FsDmaBuf>,
+    ToDeviceDmaSegmentSlice,
+    ToDeviceDmaSegmentSlice,
+    FromDeviceDmaSegmentSlice,
+    FromDeviceDmaSegmentSlice,
 );
 
 impl FileSystemDevice {
@@ -30,7 +33,7 @@ impl FileSystemDevice {
     pub(super) fn prepare_in_header_buf(
         &self,
         in_header: InHeader,
-    ) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    ) -> Result<ToDeviceDmaSegmentSlice, VirtioDeviceError> {
         let in_header_buf = self.alloc_to_device_buf(size_of::<InHeader>())?;
         let in_header_slice = Slice::new(in_header_buf.clone(), 0..size_of::<InHeader>());
         in_header_slice.write_val(0, &in_header).unwrap();
@@ -44,7 +47,7 @@ impl FileSystemDevice {
     pub(super) fn prepare_in_payload_buf<T: Pod>(
         &self,
         in_payload: T,
-    ) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    ) -> Result<ToDeviceDmaSegmentSlice, VirtioDeviceError> {
         let in_payload_buf = self.alloc_to_device_buf(size_of::<T>())?;
         let in_payload_slice = Slice::new(in_payload_buf.clone(), 0..size_of::<T>());
         in_payload_slice.write_val(0, &in_payload).unwrap();
@@ -58,7 +61,7 @@ impl FileSystemDevice {
     pub(super) fn prepare_in_name_buf(
         &self,
         name: &str,
-    ) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    ) -> Result<ToDeviceDmaSegmentSlice, VirtioDeviceError> {
         let in_name_buf = self.alloc_to_device_buf(name.len() + 1)?;
         let name_slice = Slice::new(in_name_buf.clone(), 0..(name.len() + 1));
 
@@ -82,7 +85,7 @@ impl FileSystemDevice {
     pub(super) fn prepare_in_data_buf(
         &self,
         data: &[u8],
-    ) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    ) -> Result<ToDeviceDmaSegmentSlice, VirtioDeviceError> {
         let in_data_buf = self.alloc_to_device_buf(data.len())?;
         let in_data_slice = Slice::new(in_data_buf.clone(), 0..data.len());
         {
@@ -97,7 +100,27 @@ impl FileSystemDevice {
         Ok(in_data_slice)
     }
 
-    pub(super) fn prepare_out_header_buf(&self) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    pub(super) fn prepare_in_data_stream_buf(
+        &self,
+        data: &[u8],
+    ) -> Result<ToDeviceDmaStreamSlice, VirtioDeviceError> {
+        let in_data_buf = self.alloc_to_device_stream(data.len())?;
+        let in_data_slice = Slice::new(in_data_buf.clone(), 0..data.len());
+        {
+            let mut writer = in_data_buf.writer().unwrap();
+            let mut data_reader = VmReader::from(data);
+            let _ = writer.write(&mut data_reader);
+        }
+        in_data_slice
+            .mem_obj()
+            .sync_to_device(in_data_slice.offset().clone())
+            .unwrap();
+        Ok(in_data_slice)
+    }
+
+    pub(super) fn prepare_out_header_buf(
+        &self,
+    ) -> Result<FromDeviceDmaSegmentSlice, VirtioDeviceError> {
         let out_header_buf = self.alloc_from_device_buf(size_of::<OutHeader>())?;
         Ok(Slice::new(
             out_header_buf.clone(),
@@ -108,8 +131,16 @@ impl FileSystemDevice {
     pub(super) fn prepare_out_payload_buf(
         &self,
         size: usize,
-    ) -> Result<Slice<FsDmaBuf>, VirtioDeviceError> {
+    ) -> Result<FromDeviceDmaSegmentSlice, VirtioDeviceError> {
         let out_payload_buf = self.alloc_from_device_buf(size)?;
+        Ok(Slice::new(out_payload_buf.clone(), 0..size))
+    }
+
+    pub(super) fn prepare_out_payload_stream_buf(
+        &self,
+        size: usize,
+    ) -> Result<FromDeviceDmaStreamSlice, VirtioDeviceError> {
+        let out_payload_buf = self.alloc_from_device_stream(size)?;
         Ok(Slice::new(out_payload_buf.clone(), 0..size))
     }
 
@@ -131,11 +162,31 @@ impl FileSystemDevice {
         ))
     }
 
-    fn alloc_to_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
-        self.dma_pools.alloc_to_device(size)
+    fn alloc_to_device_buf(
+        &self,
+        size: usize,
+    ) -> Result<Arc<DmaSegment<ToDevice>>, VirtioDeviceError> {
+        self.to_device_pool.alloc_segment(size)
     }
 
-    fn alloc_from_device_buf(&self, size: usize) -> Result<FsDmaBuf, VirtioDeviceError> {
-        self.dma_pools.alloc_from_device(size)
+    fn alloc_from_device_buf(
+        &self,
+        size: usize,
+    ) -> Result<Arc<DmaSegment<FromDevice>>, VirtioDeviceError> {
+        self.from_device_pool.alloc_segment(size)
+    }
+
+    fn alloc_to_device_stream(
+        &self,
+        size: usize,
+    ) -> Result<Arc<DmaStream<ToDevice>>, VirtioDeviceError> {
+        self.to_device_pool.alloc_stream(size)
+    }
+
+    fn alloc_from_device_stream(
+        &self,
+        size: usize,
+    ) -> Result<Arc<DmaStream<FromDevice>>, VirtioDeviceError> {
+        self.from_device_pool.alloc_stream(size)
     }
 }

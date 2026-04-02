@@ -21,8 +21,17 @@ impl FileSystemDevice {
         let request = self.submit_request(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.wait_for_request_early(selector, &request)?;
@@ -73,8 +82,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_name_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -113,8 +131,22 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[
+                as_dma_buf(&in_header_slice),
+                as_dma_buf(&in_payload_slice),
+                as_dma_buf(&in_name_slice),
+            ],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -154,8 +186,22 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[
+                as_dma_buf(&in_header_slice),
+                as_dma_buf(&in_payload_slice),
+                as_dma_buf(&in_name_slice),
+            ],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -188,8 +234,13 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_name_slice)],
+            &[as_dma_buf(&out_header_slice)],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -215,8 +266,13 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_name_slice)],
+            &[as_dma_buf(&out_header_slice)],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -252,8 +308,22 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[
+                as_dma_buf(&in_header_slice),
+                as_dma_buf(&in_payload_slice),
+                as_dma_buf(&in_name_slice),
+            ],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -286,8 +356,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -320,8 +399,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -352,8 +440,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -385,35 +482,86 @@ impl FileSystemDevice {
         let read_in = ReadIn::new(fh, offset, size);
 
         let out_payload_size = size as usize;
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, read_in, out_payload_size)?;
-
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
-            selector,
-            unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
-        )?;
+        let payload = if out_payload_size <= PAGE_SIZE {
+            let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+                self.prepare_request_slices(in_header, read_in, out_payload_size)?;
 
-        let out_header = self.check_reply(&out_header_slice, unique)?;
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
-        let payload_len = cmp::min(payload_len, out_payload_size);
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
 
-        let mut payload = vec![0u8; payload_len];
-        let mut payload_reader = out_payload_slice.reader().unwrap();
-        payload_reader.limit(payload_len);
-        payload_reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+            let out_header = self.check_reply(&out_header_slice, unique)?;
+            let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+            let payload_len = cmp::min(payload_len, out_payload_size);
+            out_payload_slice
+                .mem_obj()
+                .sync_from_device(out_payload_slice.offset().clone())
+                .unwrap();
+
+            let mut payload = vec![0u8; payload_len];
+            let mut payload_reader = out_payload_slice.reader().unwrap();
+            payload_reader.limit(payload_len);
+            payload_reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+            payload
+        } else {
+            let in_header_slice = self.prepare_in_header_buf(in_header)?;
+            let in_payload_slice = self.prepare_in_payload_buf(read_in)?;
+            let out_header_slice = self.prepare_out_header_buf()?;
+            let out_payload_slice = self.prepare_out_payload_stream_buf(out_payload_size)?;
+
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
+
+            let out_header = self.check_reply(&out_header_slice, unique)?;
+            let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+            let payload_len = cmp::min(payload_len, out_payload_size);
+            out_payload_slice
+                .mem_obj()
+                .sync_from_device(out_payload_slice.offset().clone())
+                .unwrap();
+
+            let mut payload = vec![0u8; payload_len];
+            let mut payload_reader = out_payload_slice.reader().unwrap();
+            payload_reader.limit(payload_len);
+            payload_reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+            payload
+        };
 
         let mut entries = Vec::new();
         let mut pos = 0usize;
+        let payload_len = payload.len();
 
         while pos + size_of::<Dirent>() <= payload_len {
-            let header: Dirent = out_payload_slice.read_val(pos).unwrap();
+            let header: Dirent = {
+                let mut reader = VmReader::from(payload.as_slice());
+                reader.skip(pos).read_val().unwrap()
+            };
             if header.namelen == 0 {
                 break;
             }
@@ -460,8 +608,13 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[as_dma_buf(&out_header_slice)],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -488,8 +641,16 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         let out_header = self.check_reply(&out_header_slice, unique)?;
@@ -535,8 +696,22 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[
+                as_dma_buf(&in_header_slice),
+                as_dma_buf(&in_payload_slice),
+                as_dma_buf(&in_name_slice),
+            ],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&in_name_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -567,8 +742,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -601,8 +785,13 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[as_dma_buf(&out_header_slice)],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -634,8 +823,17 @@ impl FileSystemDevice {
         self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+            &[
+                as_dma_buf(&out_header_slice),
+                as_dma_buf(&out_payload_slice),
+            ],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+                request_dma_buf(&out_header_slice),
+                request_dma_buf(&out_payload_slice),
+            ],
         )?;
 
         self.check_reply(&out_header_slice, unique)?;
@@ -667,32 +865,80 @@ impl FileSystemDevice {
         let read_in = ReadIn::new(fh, offset, size);
 
         let out_payload_size = size as usize;
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, read_in, out_payload_size)?;
-
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
-            selector,
-            unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
-        )?;
+        if out_payload_size <= PAGE_SIZE {
+            let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
+                self.prepare_request_slices(in_header, read_in, out_payload_size)?;
 
-        let out_header = self.check_reply(&out_header_slice, unique)?;
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
 
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
-        let payload_len = cmp::min(payload_len, out_payload_size);
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
+            let out_header = self.check_reply(&out_header_slice, unique)?;
 
-        let mut content = vec![0u8; payload_len];
-        let mut reader = out_payload_slice.reader().unwrap();
-        reader.limit(payload_len);
-        reader.read(&mut VmWriter::from(content.as_mut_slice()));
+            let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+            let payload_len = cmp::min(payload_len, out_payload_size);
+            out_payload_slice
+                .mem_obj()
+                .sync_from_device(out_payload_slice.offset().clone())
+                .unwrap();
 
-        Ok(content)
+            let mut content = vec![0u8; payload_len];
+            let mut reader = out_payload_slice.reader().unwrap();
+            reader.limit(payload_len);
+            reader.read(&mut VmWriter::from(content.as_mut_slice()));
+
+            Ok(content)
+        } else {
+            let in_header_slice = self.prepare_in_header_buf(in_header)?;
+            let in_payload_slice = self.prepare_in_payload_buf(read_in)?;
+            let out_header_slice = self.prepare_out_header_buf()?;
+            let out_payload_slice = self.prepare_out_payload_stream_buf(out_payload_size)?;
+
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
+
+            let out_header = self.check_reply(&out_header_slice, unique)?;
+
+            let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+            let payload_len = cmp::min(payload_len, out_payload_size);
+            out_payload_slice
+                .mem_obj()
+                .sync_from_device(out_payload_slice.offset().clone())
+                .unwrap();
+
+            let mut content = vec![0u8; payload_len];
+            let mut reader = out_payload_slice.reader().unwrap();
+            reader.limit(payload_len);
+            reader.read(&mut VmWriter::from(content.as_mut_slice()));
+
+            Ok(content)
+        }
     }
 
     pub fn fuse_write(
@@ -715,15 +961,54 @@ impl FileSystemDevice {
         let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
             self.prepare_request_slices(in_header, write_in, size_of::<WriteOut>())?;
 
-        let in_data_slice = self.prepare_in_data_buf(data)?;
-
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
-            selector,
-            unique,
-            &[&in_header_slice, &in_payload_slice, &in_data_slice],
-            &[&out_header_slice, &out_payload_slice],
-        )?;
+        if data.len() <= PAGE_SIZE {
+            let in_data_slice = self.prepare_in_data_buf(data)?;
+
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[
+                    as_dma_buf(&in_header_slice),
+                    as_dma_buf(&in_payload_slice),
+                    as_dma_buf(&in_data_slice),
+                ],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&in_data_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
+        } else {
+            let in_data_slice = self.prepare_in_data_stream_buf(data)?;
+
+            self.submit_request_and_wait(
+                selector,
+                unique,
+                &[
+                    as_dma_buf(&in_header_slice),
+                    as_dma_buf(&in_payload_slice),
+                    as_dma_buf(&in_data_slice),
+                ],
+                &[
+                    as_dma_buf(&out_header_slice),
+                    as_dma_buf(&out_payload_slice),
+                ],
+                vec![
+                    request_dma_buf(&in_header_slice),
+                    request_dma_buf(&in_payload_slice),
+                    request_dma_buf(&in_data_slice),
+                    request_dma_buf(&out_header_slice),
+                    request_dma_buf(&out_payload_slice),
+                ],
+            )?;
+        }
 
         self.check_reply(&out_header_slice, unique)?;
 
@@ -758,8 +1043,12 @@ impl FileSystemDevice {
         let _ = self.submit_request(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
+            &[as_dma_buf(&in_header_slice), as_dma_buf(&in_payload_slice)],
             &[],
+            vec![
+                request_dma_buf(&in_header_slice),
+                request_dma_buf(&in_payload_slice),
+            ],
         )?;
 
         Ok(())

@@ -163,6 +163,23 @@ impl VirtQueue {
         inputs: &[&T],
         outputs: &[&T],
     ) -> Result<u16, QueueError> {
+        self.add_dma_buf_impl(inputs, outputs)
+    }
+
+    /// Adds DMA buffers with direction-agnostic trait objects.
+    pub fn add_dma_buf_dyn(
+        &mut self,
+        inputs: &[&dyn DmaBuf],
+        outputs: &[&dyn DmaBuf],
+    ) -> Result<u16, QueueError> {
+        self.add_dma_buf_impl(inputs, outputs)
+    }
+
+    fn add_dma_buf_impl<I: DmaBuf + ?Sized, O: DmaBuf + ?Sized>(
+        &mut self,
+        inputs: &[&I],
+        outputs: &[&O],
+    ) -> Result<u16, QueueError> {
         if inputs.is_empty() && outputs.is_empty() {
             return Err(QueueError::InvalidArgs);
         }
@@ -395,7 +412,7 @@ pub struct Descriptor {
 
 type DescriptorPtr<'a> = SafePtr<Descriptor, &'a Arc<DmaCoherent>, TRightSet<TRights![Dup, Write]>>;
 
-fn set_dma_buf<T: DmaBuf>(desc_ptr: &DescriptorPtr, buf: &T) {
+fn set_dma_buf<T: DmaBuf + ?Sized>(desc_ptr: &DescriptorPtr, buf: &T) {
     // TODO: skip the empty dma buffer or just return error?
     debug_assert_ne!(buf.len(), 0);
     let daddr = buf.daddr();

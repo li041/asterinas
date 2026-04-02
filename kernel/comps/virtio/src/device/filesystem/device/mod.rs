@@ -18,7 +18,11 @@ use aster_util::mem_obj_slice::Slice;
 use log::{debug, info, warn};
 use ostd::{
     arch::trap::TrapFrame,
-    mm::{VmIo, VmReader, VmWriter, io::util::HasVmReaderWriter},
+    mm::{
+        PAGE_SIZE, VmIo, VmReader, VmWriter,
+        dma::{FromDevice, ToDevice},
+        io::util::HasVmReaderWriter,
+    },
     sync::{LocalIrqDisabled, SpinLock, Waiter, Waker},
     timer::{Jiffies, TIMER_FREQ},
 };
@@ -28,11 +32,15 @@ use spin::Once;
 use super::{
     DEVICE_NAME,
     config::{FileSystemFeatures, VirtioFsConfig},
-    pool::{FsDmaBuf, FsDmaPools},
+    pool::{
+        FromDeviceDmaSegmentSlice, FromDeviceDmaStreamSlice, FsDmaPool, FsRequestDmaBuf,
+        ToDeviceDmaSegmentSlice, ToDeviceDmaStreamSlice, as_dma_buf, request_dma_buf,
+    },
     protocol::*,
 };
 use crate::{
     device::VirtioDeviceError,
+    dma_buf::DmaBuf,
     queue::{QueueError, VirtQueue},
     transport::{VirtioTransport, VirtioTransportError},
 };
@@ -58,12 +66,12 @@ struct RequestWaitState {
 }
 
 struct FsRequest {
-    _buffers: Vec<FsDmaBuf>,
+    _buffers: Vec<FsRequestDmaBuf>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
 impl FsRequest {
-    fn new(buffers: Vec<FsDmaBuf>) -> Arc<Self> {
+    fn new(buffers: Vec<FsRequestDmaBuf>) -> Arc<Self> {
         Arc::new(Self {
             _buffers: buffers,
             wait_state: SpinLock::new(RequestWaitState {
@@ -116,7 +124,8 @@ pub struct FileSystemDevice {
     transport: SpinLock<Box<dyn VirtioTransport>, LocalIrqDisabled>,
     hiprio_queue: FsRequestQueue,
     request_queues: Vec<FsRequestQueue>,
-    dma_pools: Arc<FsDmaPools>,
+    to_device_pool: FsDmaPool<ToDevice>,
+    from_device_pool: FsDmaPool<FromDevice>,
     next_unique: AtomicU64,
     tag: String,
     notify_supported: bool,

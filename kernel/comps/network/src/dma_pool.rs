@@ -10,9 +10,9 @@ use aster_softirq::BottomHalfDisabled;
 use bitvec::array::BitArray;
 use ostd::{
     mm::{
-        Daddr, FrameAllocOptions, HasDaddr, Infallible, PAGE_SIZE, VmReader, VmWriter,
+        Daddr, FrameAllocOptions, HasDaddr, HasSize, Infallible, PAGE_SIZE, VmReader, VmWriter,
         dma::{DmaDirection, DmaStream},
-        io::util::HasVmReaderWriter,
+        io::util::{HasVmReaderWriter, VmReaderWriterResult},
     },
     sync::SpinLock,
 };
@@ -215,6 +215,12 @@ impl<D: DmaDirection> HasDaddr for DmaSegment<D> {
     }
 }
 
+impl<D: DmaDirection> HasSize for DmaSegment<D> {
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
 impl<D: DmaDirection> DmaSegment<D> {
     pub const fn size(&self) -> usize {
         self.size
@@ -244,6 +250,18 @@ impl<D: DmaDirection> DmaSegment<D> {
         let offset = self.daddr() - self.dma_stream.daddr();
         let range = byte_range.start + offset..byte_range.end + offset;
         self.dma_stream.sync_to_device(range)
+    }
+}
+
+impl<D: DmaDirection> HasVmReaderWriter for DmaSegment<D> {
+    type Types = VmReaderWriterResult;
+
+    fn reader(&self) -> Result<VmReader<'_, Infallible>, ostd::Error> {
+        DmaSegment::reader(self)
+    }
+
+    fn writer(&self) -> Result<VmWriter<'_, Infallible>, ostd::Error> {
+        DmaSegment::writer(self)
     }
 }
 
