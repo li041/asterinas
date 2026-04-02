@@ -1213,16 +1213,11 @@ mod tests {
     use ostd::{mm::VmIo, prelude::ktest};
 
     use super::*;
-    use crate::fs::{
-        ramfs::RamFs,
-        vfs::path::{Mount, MountNamespace},
-    };
+    use crate::fs::{ramfs::RamFs, vfs::path::Mount};
 
     fn new_dummy_mount() -> Arc<Mount> {
-        Mount::new_root(
-            RamFs::new(),
-            Arc::downgrade(MountNamespace::get_init_singleton()),
-        )
+        // Overlayfs ktests only need an isolated mount identity for `Path` operations.
+        Mount::new_root(RamFs::new(), Weak::new())
     }
 
     fn create_overlay_fs() -> Arc<dyn FileSystem> {
