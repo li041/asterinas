@@ -287,6 +287,13 @@ impl DirDentry<'_> {
         let children = self.children.read();
         match children.find(name)? {
             Some(child) => {
+                // TODO: Linux FUSE invalidates a stale cached dentry and retries
+                // the lookup instead of surfacing the stale-cache condition as a
+                // hard lookup error.
+                // We currently propagate `revalidate_child()`errors directly,
+                // so a stale cached child can become a user-visible failure
+                // rather than a cache miss that falls back to a fresh filesystem lookup.
+                // Reference: <https://github.com/torvalds/linux/blob/f14faaf3a1fb3b9e4cf2e56269711fb85fba9458/fs/fuse/dir.c#L384-L443>
                 child.inode().revalidate_child(name, child.as_ref())?;
                 Ok(Some(child))
             }
