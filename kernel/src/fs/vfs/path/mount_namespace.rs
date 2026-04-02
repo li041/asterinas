@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use alloc::string::{String, ToString};
-
-use ostd::boot::boot_info;
 use spin::Once;
 
 use crate::{
     fs::{
         pseudofs::{NsCommonOps, NsType, StashedDentry},
+        rootfs::{BootRootSpec, boot_root_spec},
         vfs::{
             file_system::FsFlags,
             path::{Mount, Path, PathResolver},
@@ -36,9 +34,10 @@ pub struct MountNamespace {
 impl MountNamespace {
     /// Returns a reference to the singleton initial mount namespace.
     ///
-    /// If `rootfs=virtiofs` is specified in the kernel command line,
-    /// the mount namespace will use virtiofs as the root filesystem.
-    /// Otherwise, it will use ramfs (default behavior).
+    /// If `rootfs=virtiofs` is specified in the kernel command line, the mount
+    /// namespace will use virtiofs as the root filesystem. Otherwise, it will
+    /// use ramfs and let `rootfs::init_in_first_kthread()` populate it from the
+    /// initramfs.
     #[doc(hidden)]
     pub fn get_init_singleton() -> &'static Arc<MountNamespace> {
         static INIT: Once<Arc<MountNamespace>> = Once::new();
@@ -46,20 +45,22 @@ impl MountNamespace {
         let owner = UserNamespace::get_init_singleton().clone();
 
         INIT.call_once(|| {
-            // Check if we should use virtiofs as root filesystem
-            let (fs_type, args) = if let Some(virtiofs_tag) = get_virtiofs_tag_from_cmdline() {
-                println!(
-                    "[kernel] creating mount namespace with virtiofs as root (tag: {}) ...",
-                    virtiofs_tag
-                );
+            let (fs_type, args) = match boot_root_spec() {
+                BootRootSpec::VirtioFs { tag } => {
+                    println!(
+                        "[kernel] creating mount namespace with virtiofs as root (tag: {}) ...",
+                        tag
+                    );
 
-                let tag = CString::new(virtiofs_tag).unwrap();
-                let fs_type = registry::look_up("virtiofs").unwrap();
-                (fs_type, Some(tag))
-            } else {
-                println!("[kernel] creating mount namespace with ramfs as root ...");
-                let fs_type = registry::look_up("ramfs").unwrap();
-                (fs_type, None)
+                    let fs_type = registry::look_up("virtiofs").unwrap();
+                    let tag = CString::new(tag.as_str()).unwrap();
+                    (fs_type, Some(tag))
+                }
+                BootRootSpec::RamfsInitramfs => {
+                    println!("[kernel] creating mount namespace with ramfs as root ...");
+                    let fs_type = registry::look_up("ramfs").unwrap();
+                    (fs_type, None)
+                }
             };
 
             let rootfs = fs_type.create(FsFlags::empty(), args, None).unwrap();
@@ -183,22 +184,4 @@ impl NsCommonOps for MountNamespace {
     fn stashed_dentry(&self) -> &StashedDentry {
         &self.stashed_dentry
     }
-}
-
-fn get_virtiofs_tag_from_cmdline() -> Option<String> {
-    let cmdline = boot_info().kernel_cmdline.as_str();
-
-    for arg in cmdline.split_whitespace() {
-        if let Some(value) = arg.strip_prefix("rootfs=") {
-            if value == "virtiofs" {
-                for tag_arg in cmdline.split_whitespace() {
-                    if let Some(tag) = tag_arg.strip_prefix("virtiofs_tag=") {
-                        return Some(tag.to_string());
-                    }
-                }
-                return Some("share_folder".to_string());
-            }
-        }
-    }
-    None
 }
