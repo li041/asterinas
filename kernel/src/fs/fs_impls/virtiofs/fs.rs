@@ -118,7 +118,7 @@ impl FileSystem for VirtioFs {
         Some(&self.tag)
     }
 
-    // lxh TODO: implement sync by issuing fsync to all open files and sync to the device if supported
+    // TODO: implement sync by issuing fsync to all open files and sync to the device if supported
     fn sync(&self) -> Result<()> {
         Ok(())
     }
