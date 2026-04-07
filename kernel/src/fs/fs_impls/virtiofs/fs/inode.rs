@@ -12,10 +12,7 @@ use core::{
 use aster_block::bio::BioWaiter;
 use aster_virtio::device::filesystem::{
     device::VirtioFsDirEntry,
-    protocol::{
-        FATTR_ATIME, FATTR_CTIME, FATTR_GID, FATTR_MODE, FATTR_MTIME, FATTR_SIZE, FATTR_UID,
-        FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FuseAttrOut, SetattrIn,
-    },
+    protocol::{FuseAttrOut, OpenFlags, SetattrIn, SetattrValid},
 };
 use log::warn;
 use ostd::{
@@ -355,9 +352,9 @@ impl VirtioFsInode {
             .fuse_open(self.nodeid(), flags)
             .map_err(|_| Error::with_message(Errno::EIO, "virtiofs open failed"))?;
         let cache_enabled =
-            self.page_cache.is_some() && (open_out.open_flags & FOPEN_DIRECT_IO == 0);
+            self.page_cache.is_some() && !open_out.open_flags.contains(OpenFlags::FOPEN_DIRECT_IO);
 
-        if open_out.open_flags & FOPEN_KEEP_CACHE == 0 {
+        if !open_out.open_flags.contains(OpenFlags::FOPEN_KEEP_CACHE) {
             self.invalidate_page_cache(self.size())?;
         }
 
@@ -522,7 +519,7 @@ impl Inode for VirtioFsInode {
             .map_err(|_| Error::with_message(Errno::EFBIG, "virtiofs resize size too large"))?;
 
         let setattr_in = SetattrIn {
-            valid: FATTR_SIZE,
+            valid: SetattrValid::FATTR_SIZE,
             size,
             ..SetattrIn::default()
         };
@@ -548,7 +545,7 @@ impl Inode for VirtioFsInode {
     fn set_mode(&self, mode: InodeMode) -> Result<()> {
         let mode_bits = u32::from(self.type_()) | u32::from(mode.bits());
         let setattr_in = SetattrIn {
-            valid: FATTR_MODE,
+            valid: SetattrValid::FATTR_MODE,
             mode: mode_bits,
             ..SetattrIn::default()
         };
@@ -561,7 +558,7 @@ impl Inode for VirtioFsInode {
 
     fn set_owner(&self, uid: Uid) -> Result<()> {
         let setattr_in = SetattrIn {
-            valid: FATTR_UID,
+            valid: SetattrValid::FATTR_UID,
             uid: uid.into(),
             ..SetattrIn::default()
         };
@@ -574,7 +571,7 @@ impl Inode for VirtioFsInode {
 
     fn set_group(&self, gid: Gid) -> Result<()> {
         let setattr_in = SetattrIn {
-            valid: FATTR_GID,
+            valid: SetattrValid::FATTR_GID,
             gid: gid.into(),
             ..SetattrIn::default()
         };
@@ -587,7 +584,7 @@ impl Inode for VirtioFsInode {
 
     fn set_atime(&self, time: Duration) {
         let setattr_in = SetattrIn {
-            valid: FATTR_ATIME,
+            valid: SetattrValid::FATTR_ATIME,
             atime: time.as_secs(),
             atimensec: time.subsec_nanos(),
             ..SetattrIn::default()
@@ -607,7 +604,7 @@ impl Inode for VirtioFsInode {
 
     fn set_mtime(&self, time: Duration) {
         let setattr_in = SetattrIn {
-            valid: FATTR_MTIME,
+            valid: SetattrValid::FATTR_MTIME,
             mtime: time.as_secs(),
             mtimensec: time.subsec_nanos(),
             ..SetattrIn::default()
@@ -627,7 +624,7 @@ impl Inode for VirtioFsInode {
 
     fn set_ctime(&self, time: Duration) {
         let setattr_in = SetattrIn {
-            valid: FATTR_CTIME,
+            valid: SetattrValid::FATTR_CTIME,
             ctime: time.as_secs(),
             ctimensec: time.subsec_nanos(),
             ..SetattrIn::default()

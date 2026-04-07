@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use bitflags::bitflags;
 use int_to_c_enum::TryFromInt;
 
 // Reference: <https://gitlab.com/virtio-fs/virtiofsd/-/blob/main/src/fuse.rs>
@@ -98,14 +99,14 @@ pub struct InitOut {
 #[derive(Debug, Pod, Clone, Copy)]
 pub struct OpenIn {
     pub flags: u32,
-    pub open_flags: u32,
+    pub open_flags: OpenFlags,
 }
 
 impl OpenIn {
     pub const fn new(flags: u32) -> Self {
         Self {
             flags,
-            open_flags: 0,
+            open_flags: OpenFlags::empty(),
         }
     }
 }
@@ -160,12 +161,18 @@ pub struct LseekOut {
 #[derive(Debug, Pod, Clone, Copy)]
 pub struct OpenOut {
     pub fh: u64,
-    pub open_flags: u32,
+    pub open_flags: OpenFlags,
     pub padding: u32,
 }
 
-pub const FOPEN_DIRECT_IO: u32 = 1 << 0;
-pub const FOPEN_KEEP_CACHE: u32 = 1 << 1;
+bitflags! {
+    #[repr(C)]
+    #[derive(Default, Pod)]
+    pub struct OpenFlags: u32 {
+        const FOPEN_DIRECT_IO = 1 << 0;
+        const FOPEN_KEEP_CACHE = 1 << 1;
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy)]
@@ -175,22 +182,28 @@ pub struct GetattrIn {
     pub fh: u64,
 }
 
-pub const FATTR_MODE: u32 = 1 << 0;
-pub const FATTR_UID: u32 = 1 << 1;
-pub const FATTR_GID: u32 = 1 << 2;
-pub const FATTR_SIZE: u32 = 1 << 3;
-pub const FATTR_ATIME: u32 = 1 << 4;
-pub const FATTR_MTIME: u32 = 1 << 5;
-pub const FATTR_FH: u32 = 1 << 6;
-pub const FATTR_ATIME_NOW: u32 = 1 << 7;
-pub const FATTR_MTIME_NOW: u32 = 1 << 8;
-pub const FATTR_LOCKOWNER: u32 = 1 << 9;
-pub const FATTR_CTIME: u32 = 1 << 10;
+bitflags! {
+    #[repr(C)]
+    #[derive(Default, Pod)]
+    pub struct SetattrValid: u32 {
+        const FATTR_MODE = 1 << 0;
+        const FATTR_UID = 1 << 1;
+        const FATTR_GID = 1 << 2;
+        const FATTR_SIZE = 1 << 3;
+        const FATTR_ATIME = 1 << 4;
+        const FATTR_MTIME = 1 << 5;
+        const FATTR_FH = 1 << 6;
+        const FATTR_ATIME_NOW = 1 << 7;
+        const FATTR_MTIME_NOW = 1 << 8;
+        const FATTR_LOCKOWNER = 1 << 9;
+        const FATTR_CTIME = 1 << 10;
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Pod, Clone, Copy, Default)]
 pub struct SetattrIn {
-    pub valid: u32,
+    pub valid: SetattrValid,
     pub padding: u32,
     pub fh: u64,
     pub size: u64,
@@ -292,7 +305,7 @@ pub struct CreateIn {
     pub flags: u32,
     pub mode: u32,
     pub umask: u32,
-    pub open_flags: u32,
+    pub open_flags: OpenFlags,
 }
 
 impl CreateIn {
@@ -301,7 +314,7 @@ impl CreateIn {
             flags,
             mode,
             umask: 0,
-            open_flags: 0,
+            open_flags: OpenFlags::empty(),
         }
     }
 }
