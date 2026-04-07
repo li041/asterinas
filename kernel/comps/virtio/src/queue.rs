@@ -158,10 +158,10 @@ impl VirtQueue {
     /// Add dma buffers to the virtqueue, return a token.
     ///
     /// Ref: linux virtio_ring.c virtqueue_add
-    pub fn add_dma_buf<T: DmaBuf>(
+    pub fn add_dma_buf<I: DmaBuf, O: DmaBuf>(
         &mut self,
-        inputs: &[&T],
-        outputs: &[&T],
+        inputs: &[&I],
+        outputs: &[&O],
     ) -> Result<u16, QueueError> {
         if inputs.is_empty() && outputs.is_empty() {
             return Err(QueueError::InvalidArgs);
