@@ -891,9 +891,6 @@ impl Inode for RamInode {
     }
 
     fn link(&self, old: &Arc<dyn Inode>, name: &str) -> Result<()> {
-        if !Arc::ptr_eq(&self.fs(), &old.fs()) {
-            return_errno_with_message!(Errno::EXDEV, "not same fs");
-        }
         if self.typ != InodeType::Dir {
             return_errno_with_message!(Errno::ENOTDIR, "self is not dir");
         }
@@ -1018,15 +1015,8 @@ impl Inode for RamInode {
             .downcast_ref::<RamInode>()
             .ok_or(Error::new(Errno::EXDEV))?;
 
-        if !Arc::ptr_eq(&self.fs(), &target.fs()) {
-            return_errno_with_message!(Errno::EXDEV, "not same fs");
-        }
-        if self.typ != InodeType::Dir {
-            return_errno_with_message!(Errno::ENOTDIR, "self is not dir");
-        }
-        if target.typ != InodeType::Dir {
-            return_errno_with_message!(Errno::ENOTDIR, "target is not dir");
-        }
+        debug_assert!(self.typ == InodeType::Dir);
+        debug_assert!(target.typ == InodeType::Dir);
 
         // Perform necessary checks to ensure that `dst_inode` can be replaced by `src_inode`.
         let check_replace_inode =
