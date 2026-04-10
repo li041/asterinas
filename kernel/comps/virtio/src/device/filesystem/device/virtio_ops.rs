@@ -37,7 +37,8 @@ impl FileSystemDevice {
         let hiprio_queue =
             FsRequestQueue::new(Self::new_queue(HIPRIO_QUEUE_INDEX, transport.as_mut())?);
 
-        let dma_pools = FsDmaPools::new();
+        let to_device_pool = FsDmaPool::new();
+        let from_device_pool = FsDmaPool::new();
 
         let mut request_queues = Vec::with_capacity(request_queue_count);
         for idx in 0..request_queue_count {
@@ -53,7 +54,8 @@ impl FileSystemDevice {
             transport: SpinLock::new(transport),
             hiprio_queue,
             request_queues,
-            dma_pools,
+            to_device_pool,
+            from_device_pool,
             next_unique: AtomicU64::new(0),
             tag,
             notify_supported,
@@ -143,22 +145,20 @@ impl FileSystemDevice {
         &self,
         selector: QueueSelector,
         unique: u64,
-        in_slices: &[&Slice<FsDmaBuf>],
-        out_slices: &[&Slice<FsDmaBuf>],
+        input_buffers: Vec<FsInBuf>,
+        output_buffers: Vec<FsOutBuf>,
     ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
         let queue = self.queue(selector);
-        let buffers = in_slices
-            .iter()
-            .chain(out_slices.iter())
-            .map(|slice| slice.mem_obj().clone())
-            .collect();
-        let request = FsRequest::new(buffers);
 
         {
             let mut virt_queue = queue.queue.lock();
+            let input_slices: Vec<_> = input_buffers.iter().collect();
+            let output_slices: Vec<_> = output_buffers.iter().collect();
 
-            let token = virt_queue.add_dma_buf(in_slices, out_slices)?;
+            let token =
+                virt_queue.add_dma_buf(input_slices.as_slice(), output_slices.as_slice())?;
             let token_idx = token as usize;
+            let request = FsRequest::new(input_buffers, output_buffers);
 
             let mut in_flight_requests = queue.in_flight_requests.lock();
             let Some(slot) = in_flight_requests.get_mut(token_idx) else {
@@ -179,47 +179,20 @@ impl FileSystemDevice {
             if virt_queue.should_notify() {
                 virt_queue.notify();
             }
+
+            Ok(request)
         }
-        Ok(request)
     }
 
     pub(super) fn submit_request_and_wait(
         &self,
         selector: QueueSelector,
         unique: u64,
-        in_slices: &[&Slice<FsDmaBuf>],
-        out_slices: &[&Slice<FsDmaBuf>],
-    ) -> Result<(), VirtioDeviceError> {
-        let request = self.submit_request(selector, unique, in_slices, out_slices)?;
-        self.wait_for_request(&request)
-    }
-
-    pub(super) fn check_reply(
-        &self,
-        out_header_slice: &Slice<FsDmaBuf>,
-        unique: u64,
-    ) -> Result<OutHeader, VirtioDeviceError> {
-        out_header_slice
-            .mem_obj()
-            .sync_from_device(out_header_slice.offset().clone())
-            .unwrap();
-        let out_header: OutHeader = out_header_slice.read_val(0).unwrap();
-        if out_header.unique != unique {
-            warn!(
-                "{} failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
-            );
-            return Err(VirtioDeviceError::QueueUnknownError);
-        }
-        if out_header.error != 0 {
-            warn!(
-                "{} failed: unique={}, error={}, out_len={}",
-                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
-            );
-            return Err(VirtioDeviceError::FileSystemError(out_header.error));
-        }
-
-        Ok(out_header)
+        input_buffers: Vec<FsInBuf>,
+        output_buffers: Vec<FsOutBuf>,
+    ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
+        let request = self.submit_request(selector, unique, input_buffers, output_buffers)?;
+        self.wait_for_request(&request).map(|_| request)
     }
 
     pub(super) fn handle_queue_irq(&self, selector: QueueSelector) {

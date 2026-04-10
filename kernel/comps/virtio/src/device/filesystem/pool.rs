@@ -9,7 +9,7 @@ use ostd::{
     Result,
     mm::{
         HasDaddr, HasSize, Infallible, PAGE_SIZE, VmReader, VmWriter,
-        dma::{DmaStream, FromDevice, ToDevice},
+        dma::{DmaDirection, DmaStream},
         io::util::{HasVmReaderWriter, VmReaderWriterResult},
     },
     sync::SpinLock,
@@ -21,166 +21,107 @@ const SIZE_CLASSES: &[usize] = &[64, 128, 256, 512, 1024, 2048, 4096];
 const POOL_INIT_SIZE: usize = 8;
 const POOL_HIGH_WATERMARK: usize = 64;
 
+pub type FsDmaBuf<D> = Slice<FsDmaStorage<D>>;
+
 #[derive(Debug)]
-pub struct FsDmaPools {
-    to_device_pools: SpinLock<BTreeMap<usize, Arc<DmaPool<ToDevice>>>>,
-    from_device_pools: SpinLock<BTreeMap<usize, Arc<DmaPool<FromDevice>>>>,
+pub struct FsDmaPool<D: DmaDirection> {
+    pools: SpinLock<BTreeMap<usize, Arc<DmaPool<D>>>>,
 }
 
-impl FsDmaPools {
+impl<D: DmaDirection> FsDmaPool<D> {
     pub fn new() -> Arc<Self> {
-        let mut to_device_pools = BTreeMap::new();
-        let mut from_device_pools = BTreeMap::new();
+        let mut pools = BTreeMap::new();
         for &class in SIZE_CLASSES {
-            to_device_pools.insert(
+            pools.insert(
                 class,
-                DmaPool::<ToDevice>::new(class, POOL_INIT_SIZE, POOL_HIGH_WATERMARK, false),
-            );
-            from_device_pools.insert(
-                class,
-                DmaPool::<FromDevice>::new(class, POOL_INIT_SIZE, POOL_HIGH_WATERMARK, false),
+                DmaPool::<D>::new(class, POOL_INIT_SIZE, POOL_HIGH_WATERMARK, false),
             );
         }
 
         Arc::new(Self {
-            to_device_pools: SpinLock::new(to_device_pools),
-            from_device_pools: SpinLock::new(from_device_pools),
+            pools: SpinLock::new(pools),
         })
     }
 
-    pub fn alloc_to_device(
-        self: &Arc<Self>,
-        required_len: usize,
-    ) -> core::result::Result<FsDmaBuf, VirtioDeviceError> {
-        let Some(&class_size) = SIZE_CLASSES.iter().find(|&&size| size >= required_len) else {
-            let stream = DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false)
+    pub fn alloc(&self, len: usize) -> core::result::Result<FsDmaBuf<D>, VirtioDeviceError> {
+        let storage = if let Some(&class_size) = SIZE_CLASSES.iter().find(|&&size| size >= len) {
+            let segment = {
+                let pools = self.pools.disable_irq().lock();
+                let pool = pools.get(&class_size).unwrap();
+                pool.alloc_segment()
+                    .map_err(|_| VirtioDeviceError::QueueUnknownError)
+            }?;
+
+            FsDmaStorage::Segment(segment)
+        } else {
+            let stream = DmaStream::alloc(len.div_ceil(PAGE_SIZE), false)
                 .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
-            return Ok(FsDmaBuf {
-                storage: Arc::new(FsDmaStorage::Stream(Arc::new(stream))),
-                required_len,
-            });
+            FsDmaStorage::Stream(stream)
         };
 
-        let segment = {
-            let pools = self.to_device_pools.disable_irq().lock();
-            let pool = pools.get(&class_size).unwrap();
-            pool.alloc_segment()
-                .map_err(|_| VirtioDeviceError::QueueUnknownError)
-        }?;
-
-        Ok(FsDmaBuf {
-            storage: Arc::new(FsDmaStorage::ToSegment(segment)),
-            required_len,
-        })
-    }
-
-    pub fn alloc_from_device(
-        self: &Arc<Self>,
-        required_len: usize,
-    ) -> core::result::Result<FsDmaBuf, VirtioDeviceError> {
-        let Some(&class_size) = SIZE_CLASSES.iter().find(|&&size| size >= required_len) else {
-            let stream = DmaStream::alloc(required_len.div_ceil(PAGE_SIZE), false)
-                .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
-            return Ok(FsDmaBuf {
-                storage: Arc::new(FsDmaStorage::Stream(Arc::new(stream))),
-                required_len,
-            });
-        };
-
-        let segment = {
-            let pools = self.from_device_pools.disable_irq().lock();
-            let pool = pools.get(&class_size).unwrap();
-            pool.alloc_segment()
-                .map_err(|_| VirtioDeviceError::QueueUnknownError)
-        }?;
-
-        Ok(FsDmaBuf {
-            storage: Arc::new(FsDmaStorage::FromSegment(segment)),
-            required_len,
-        })
+        Ok(Slice::new(storage, 0..len))
     }
 }
 
 #[derive(Debug)]
-enum FsDmaStorage {
-    ToSegment(DmaSegment<ToDevice>),
-    FromSegment(DmaSegment<FromDevice>),
-    Stream(Arc<DmaStream>),
+pub enum FsDmaStorage<D: DmaDirection> {
+    Stream(DmaStream<D>),
+    Segment(DmaSegment<D>),
 }
 
-#[derive(Debug, Clone)]
-pub struct FsDmaBuf {
-    storage: Arc<FsDmaStorage>,
-    required_len: usize,
-}
-
-impl FsDmaBuf {
+impl<D: DmaDirection> FsDmaStorage<D> {
     pub fn sync_from_device(&self, byte_range: Range<usize>) -> Result<()> {
-        match self.storage.as_ref() {
-            // To-device buffers are not expected to be synced from device.
-            FsDmaStorage::ToSegment(_) => Ok(()),
-            FsDmaStorage::FromSegment(segment) => segment.sync_from_device(byte_range),
-            FsDmaStorage::Stream(stream) => stream.sync_from_device(byte_range),
+        match self {
+            Self::Stream(stream) => stream.sync_from_device(byte_range),
+            Self::Segment(segment) => segment.sync_from_device(byte_range),
         }
     }
 
     pub fn sync_to_device(&self, byte_range: Range<usize>) -> Result<()> {
-        match self.storage.as_ref() {
-            FsDmaStorage::ToSegment(segment) => segment.sync_to_device(byte_range),
-            // From-device buffers are not expected to be synced to device.
-            FsDmaStorage::FromSegment(_) => Ok(()),
-            FsDmaStorage::Stream(stream) => stream.sync_to_device(byte_range),
+        match self {
+            Self::Stream(stream) => stream.sync_to_device(byte_range),
+            Self::Segment(segment) => segment.sync_to_device(byte_range),
         }
     }
 }
 
-impl HasSize for FsDmaBuf {
+impl<D: DmaDirection> HasSize for FsDmaStorage<D> {
     fn size(&self) -> usize {
-        self.required_len
-    }
-}
-
-impl HasDaddr for FsDmaBuf {
-    fn daddr(&self) -> ostd::mm::Daddr {
-        match self.storage.as_ref() {
-            FsDmaStorage::ToSegment(segment) => segment.daddr(),
-            FsDmaStorage::FromSegment(segment) => segment.daddr(),
-            FsDmaStorage::Stream(stream) => stream.daddr(),
+        match self {
+            Self::Stream(stream) => stream.size(),
+            Self::Segment(segment) => segment.size(),
         }
     }
 }
 
-impl HasVmReaderWriter for FsDmaBuf {
+impl<D: DmaDirection> HasDaddr for FsDmaStorage<D> {
+    fn daddr(&self) -> ostd::mm::Daddr {
+        match self {
+            Self::Stream(stream) => stream.daddr(),
+            Self::Segment(segment) => segment.daddr(),
+        }
+    }
+}
+
+impl<D: DmaDirection> HasVmReaderWriter for FsDmaStorage<D> {
     type Types = VmReaderWriterResult;
 
     fn reader(&self) -> ostd::prelude::Result<VmReader<'_, Infallible>> {
-        let mut reader = match self.storage.as_ref() {
-            FsDmaStorage::ToSegment(segment) => segment.reader()?,
-            FsDmaStorage::FromSegment(segment) => segment.reader()?,
-            FsDmaStorage::Stream(stream) => stream.reader()?,
-        };
-        reader.limit(self.required_len);
-        Ok(reader)
+        match self {
+            Self::Stream(stream) => stream.reader(),
+            Self::Segment(segment) => segment.reader(),
+        }
     }
 
     fn writer(&self) -> ostd::prelude::Result<VmWriter<'_, Infallible>> {
-        let mut writer = match self.storage.as_ref() {
-            FsDmaStorage::ToSegment(segment) => segment.writer()?,
-            FsDmaStorage::FromSegment(segment) => segment.writer()?,
-            FsDmaStorage::Stream(stream) => stream.writer()?,
-        };
-        writer.limit(self.required_len);
-        Ok(writer)
+        match self {
+            Self::Stream(stream) => stream.writer(),
+            Self::Segment(segment) => segment.writer(),
+        }
     }
 }
 
-impl DmaBuf for FsDmaBuf {
-    fn len(&self) -> usize {
-        self.size()
-    }
-}
-
-impl DmaBuf for Slice<FsDmaBuf> {
+impl<D: DmaDirection> DmaBuf for Slice<FsDmaStorage<D>> {
     fn len(&self) -> usize {
         self.size()
     }

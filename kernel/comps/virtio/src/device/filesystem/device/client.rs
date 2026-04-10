@@ -21,19 +21,13 @@ impl FileSystemDevice {
         let request = self.submit_request(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
 
         self.wait_for_request_early(selector, &request)?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let init_out: InitOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let init_out: InitOut = request.read_payload(0)?;
 
         info!(
             "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",
@@ -70,20 +64,14 @@ impl FileSystemDevice {
         let out_payload_slice = self.prepare_out_payload_buf(size_of::<EntryOut>())?;
 
         let selector = self.select_request_queue(parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_name_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let entry_out: EntryOut = request.read_payload(0)?;
 
         Ok(entry_out)
     }
@@ -110,20 +98,14 @@ impl FileSystemDevice {
         let in_name_slice = self.prepare_in_name_buf(name)?;
 
         let selector = self.select_request_queue(parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice, in_name_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let entry_out: EntryOut = request.read_payload(0)?;
 
         Ok(entry_out)
     }
@@ -151,20 +133,14 @@ impl FileSystemDevice {
         let in_name_slice = self.prepare_in_name_buf(name)?;
 
         let selector = self.select_request_queue(parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice, in_name_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let entry_out: EntryOut = request.read_payload(0)?;
 
         Ok(entry_out)
     }
@@ -185,14 +161,13 @@ impl FileSystemDevice {
         let out_header_slice = self.prepare_out_header_buf()?;
 
         let selector = self.select_request_queue(parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice],
+            vec![in_header_slice, in_name_slice],
+            vec![out_header_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
+        request.check_reply(unique)?;
 
         Ok(())
     }
@@ -212,14 +187,13 @@ impl FileSystemDevice {
 
         let out_header_slice = self.prepare_out_header_buf()?;
         let selector = self.select_request_queue(parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_name_slice],
-            &[&out_header_slice],
+            vec![in_header_slice, in_name_slice],
+            vec![out_header_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
+        request.check_reply(unique)?;
 
         Ok(())
     }
@@ -249,21 +223,15 @@ impl FileSystemDevice {
 
         let selector = self.select_request_queue(parent_nodeid);
 
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice, in_name_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let entry_out: EntryOut = out_payload_slice.read_val(0).unwrap();
-        let open_out: OpenOut = out_payload_slice.read_val(size_of::<EntryOut>()).unwrap();
+        request.check_reply(unique)?;
+        let entry_out: EntryOut = request.read_payload(0)?;
+        let open_out: OpenOut = request.read_payload(size_of::<EntryOut>())?;
 
         Ok((entry_out, open_out))
     }
@@ -283,21 +251,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, getattr_in, size_of::<FuseAttrOut>())?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-
-        Ok(out_payload_slice.read_val(0).unwrap())
+        request.check_reply(unique)?;
+        request.read_payload(0)
     }
 
     pub fn fuse_setattr(
@@ -317,21 +278,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, setattr_in, size_of::<FuseAttrOut>())?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-
-        Ok(out_payload_slice.read_val(0).unwrap())
+        request.check_reply(unique)?;
+        request.read_payload(0)
     }
 
     pub fn fuse_opendir(&self, nodeid: u64) -> Result<u64, VirtioDeviceError> {
@@ -349,20 +303,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>())?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let open_out: OpenOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let open_out: OpenOut = request.read_payload(0)?;
 
         Ok(open_out.fh)
     }
@@ -389,31 +337,25 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, read_in, out_payload_size)?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique)?;
+        let out_header = request.check_reply(unique)?;
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         let payload_len = cmp::min(payload_len, out_payload_size);
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
 
         let mut payload = vec![0u8; payload_len];
-        let mut payload_reader = out_payload_slice.reader().unwrap();
-        payload_reader.limit(payload_len);
-        payload_reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+        request.read_payload_bytes(0, payload.as_mut_slice())?;
 
         let mut entries = Vec::new();
         let mut pos = 0usize;
 
         while pos + size_of::<Dirent>() <= payload_len {
-            let header: Dirent = out_payload_slice.read_val(pos).unwrap();
+            let header = Dirent::from_bytes(&payload[pos..pos + size_of::<Dirent>()]);
             if header.namelen == 0 {
                 break;
             }
@@ -457,14 +399,13 @@ impl FileSystemDevice {
         let out_header_slice = self.prepare_out_header_buf()?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
+        request.check_reply(unique)?;
 
         Ok(())
     }
@@ -485,24 +426,18 @@ impl FileSystemDevice {
         let out_payload_slice = self.prepare_out_payload_buf(MAX_READLINK_SIZE)?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique)?;
+        let out_header = request.check_reply(unique)?;
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
 
         let mut payload = vec![0u8; payload_len];
-        let mut reader = out_payload_slice.reader().unwrap();
-        reader.limit(payload_len);
-        reader.read(&mut VmWriter::from(payload.as_mut_slice()));
+        request.read_payload_bytes(0, payload.as_mut_slice())?;
 
         // Fuse readlink may include a trailing '\0'.
         let end = payload.iter().position(|b| *b == 0).unwrap_or(payload_len);
@@ -532,21 +467,14 @@ impl FileSystemDevice {
         let in_name_slice = self.prepare_in_name_buf(new_name)?;
 
         let selector = self.select_request_queue(new_parent_nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_name_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice, in_name_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-
-        Ok(out_payload_slice.read_val(0).unwrap())
+        request.check_reply(unique)?;
+        request.read_payload(0)
     }
 
     pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<OpenOut, VirtioDeviceError> {
@@ -564,20 +492,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>())?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let open_out: OpenOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let open_out: OpenOut = request.read_payload(0)?;
 
         Ok(open_out)
     }
@@ -598,14 +520,13 @@ impl FileSystemDevice {
         let out_header_slice = self.prepare_out_header_buf()?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
+        request.check_reply(unique)?;
 
         Ok(())
     }
@@ -631,20 +552,14 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, lseek_in, size_of::<LseekOut>())?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let lseek_out: LseekOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let lseek_out: LseekOut = request.read_payload(0)?;
 
         Ok(lseek_out.offset)
     }
@@ -671,26 +586,20 @@ impl FileSystemDevice {
             self.prepare_request_slices(in_header, read_in, out_payload_size)?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
 
-        let out_header = self.check_reply(&out_header_slice, unique)?;
+        let out_header = request.check_reply(unique)?;
 
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
         let payload_len = cmp::min(payload_len, out_payload_size);
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
 
         let mut content = vec![0u8; payload_len];
-        let mut reader = out_payload_slice.reader().unwrap();
-        reader.limit(payload_len);
-        reader.read(&mut VmWriter::from(content.as_mut_slice()));
+        request.read_payload_bytes(0, content.as_mut_slice())?;
 
         Ok(content)
     }
@@ -718,20 +627,14 @@ impl FileSystemDevice {
         let in_data_slice = self.prepare_in_data_buf(data)?;
 
         let selector = self.select_request_queue(nodeid);
-        self.submit_request_and_wait(
+        let request = self.submit_request_and_wait(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice, &in_data_slice],
-            &[&out_header_slice, &out_payload_slice],
+            vec![in_header_slice, in_payload_slice, in_data_slice],
+            vec![out_header_slice, out_payload_slice],
         )?;
-
-        self.check_reply(&out_header_slice, unique)?;
-
-        out_payload_slice
-            .mem_obj()
-            .sync_from_device(out_payload_slice.offset().clone())
-            .unwrap();
-        let write_out: WriteOut = out_payload_slice.read_val(0).unwrap();
+        request.check_reply(unique)?;
+        let write_out: WriteOut = request.read_payload(0)?;
 
         Ok(write_out.size as usize)
     }
@@ -758,8 +661,8 @@ impl FileSystemDevice {
         let _ = self.submit_request(
             selector,
             unique,
-            &[&in_header_slice, &in_payload_slice],
-            &[],
+            vec![in_header_slice, in_payload_slice],
+            vec![],
         )?;
 
         Ok(())

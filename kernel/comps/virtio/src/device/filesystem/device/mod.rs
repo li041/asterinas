@@ -14,11 +14,14 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use aster_util::mem_obj_slice::Slice;
 use log::{debug, info, warn};
 use ostd::{
     arch::trap::TrapFrame,
-    mm::{VmIo, VmReader, VmWriter, io::util::HasVmReaderWriter},
+    mm::{
+        HasSize, VmIo, VmReader,
+        dma::{FromDevice, ToDevice},
+        io::util::HasVmReaderWriter,
+    },
     sync::{LocalIrqDisabled, SpinLock, Waiter, Waker},
     timer::{Jiffies, TIMER_FREQ},
 };
@@ -28,7 +31,7 @@ use spin::Once;
 use super::{
     DEVICE_NAME,
     config::{FileSystemFeatures, VirtioFsConfig},
-    pool::{FsDmaBuf, FsDmaPools},
+    pool::{FsDmaBuf, FsDmaPool},
     protocol::*,
 };
 use crate::{
@@ -44,6 +47,9 @@ const O_RDWR: u32 = 2;
 
 static FILESYSTEM_DEVICES: Once<SpinLock<Vec<Arc<FileSystemDevice>>>> = Once::new();
 
+type FsInBuf = FsDmaBuf<ToDevice>;
+type FsOutBuf = FsDmaBuf<FromDevice>;
+
 #[derive(Debug, Clone)]
 pub struct VirtioFsDirEntry {
     pub ino: u64,
@@ -58,19 +64,100 @@ struct RequestWaitState {
 }
 
 struct FsRequest {
-    _buffers: Vec<FsDmaBuf>,
+    _input_buffers: Vec<FsInBuf>,
+    output_buffers: Vec<FsOutBuf>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
 impl FsRequest {
-    fn new(buffers: Vec<FsDmaBuf>) -> Arc<Self> {
+    fn new(input_buffers: Vec<FsInBuf>, output_buffers: Vec<FsOutBuf>) -> Arc<Self> {
         Arc::new(Self {
-            _buffers: buffers,
+            _input_buffers: input_buffers,
+            output_buffers,
             wait_state: SpinLock::new(RequestWaitState {
                 completed: false,
                 waker: None,
             }),
         })
+    }
+
+    fn check_reply(&self, unique: u64) -> Result<OutHeader, VirtioDeviceError> {
+        let out_header_buf = self
+            .output_buffers
+            .first()
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        out_header_buf
+            .mem_obj()
+            .sync_from_device(out_header_buf.offset().clone())
+            .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+
+        let out_header: OutHeader = out_header_buf
+            .read_val(0)
+            .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+        if out_header.unique != unique {
+            warn!(
+                "{} failed: unique={}, error={}, out_len={}",
+                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
+            );
+            return Err(VirtioDeviceError::QueueUnknownError);
+        }
+        if out_header.error != 0 {
+            warn!(
+                "{} failed: unique={}, error={}, out_len={}",
+                DEVICE_NAME, out_header.unique, out_header.error, out_header.len
+            );
+            return Err(VirtioDeviceError::FileSystemError(out_header.error));
+        }
+
+        Ok(out_header)
+    }
+
+    fn read_payload<T: Pod>(&self, offset: usize) -> Result<T, VirtioDeviceError> {
+        let mut value = T::new_zeroed();
+        self.read_payload_bytes(offset, value.as_mut_bytes())?;
+        Ok(value)
+    }
+
+    fn read_payload_bytes(&self, offset: usize, dst: &mut [u8]) -> Result<(), VirtioDeviceError> {
+        if dst.is_empty() {
+            return Ok(());
+        }
+
+        let end_offset = offset
+            .checked_add(dst.len())
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let mut payload_offset = 0usize;
+        let mut copied = 0usize;
+
+        for payload_buf in self.output_buffers.iter().skip(1) {
+            let next_payload_offset = payload_offset
+                .checked_add(payload_buf.size())
+                .ok_or(VirtioDeviceError::QueueUnknownError)?;
+            let read_start = cmp::max(offset, payload_offset);
+            let read_end = cmp::min(end_offset, next_payload_offset);
+
+            if read_start < read_end {
+                payload_buf
+                    .mem_obj()
+                    .sync_from_device(payload_buf.offset().clone())
+                    .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+
+                let local_offset = read_start - payload_offset;
+                let copy_len = read_end - read_start;
+                payload_buf
+                    .read_bytes(local_offset, &mut dst[copied..copied + copy_len])
+                    .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+                copied += copy_len;
+
+                if copied == dst.len() {
+                    return Ok(());
+                }
+            }
+
+            payload_offset = next_payload_offset;
+        }
+
+        Err(VirtioDeviceError::QueueUnknownError)
     }
 }
 
@@ -116,7 +203,8 @@ pub struct FileSystemDevice {
     transport: SpinLock<Box<dyn VirtioTransport>, LocalIrqDisabled>,
     hiprio_queue: FsRequestQueue,
     request_queues: Vec<FsRequestQueue>,
-    dma_pools: Arc<FsDmaPools>,
+    to_device_pool: Arc<FsDmaPool<ToDevice>>,
+    from_device_pool: Arc<FsDmaPool<FromDevice>>,
     next_unique: AtomicU64,
     tag: String,
     notify_supported: bool,
