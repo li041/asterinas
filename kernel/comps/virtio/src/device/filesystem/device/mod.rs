@@ -8,7 +8,6 @@ use alloc::{
     vec::Vec,
 };
 use core::{
-    cmp,
     mem::size_of,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -62,35 +61,48 @@ struct RequestWaitState {
     waker: Option<Arc<Waker>>,
 }
 
-trait InFlightRequest: Send + Sync {
-    fn mark_completed(&self);
-}
-
 pub(super) trait FuseOperation {
     type Output;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError>;
+    fn opcode(&self) -> FuseOpcode;
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError>;
+    fn nodeid(&self) -> u64;
+
+    fn body_segments(&self) -> Vec<&[u8]>;
+
+    fn out_payload_size(&self) -> Option<usize>;
+
+    fn request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        let body_segments = self.body_segments();
+        fs.prepare_fuse_request(
+            self.opcode() as u32,
+            self.nodeid(),
+            body_segments.as_slice(),
+            self.out_payload_size(),
+        )
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError>
+    where
+        Self::Output: Pod,
+    {
+        request.read_payload(0)
+    }
 }
 
 pub(super) struct FuseRequest {
     unique: u64,
     nodeid: u64,
-    input_buffers: Vec<FsInBuf>,
-    output_buffers: Vec<FsOutBuf>,
+    in_buf: FsInBuf,
+    out_buf: Option<FsOutBuf>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
 impl FuseRequest {
     pub(super) fn check_reply(&self) -> Result<OutHeader, VirtioDeviceError> {
         let out_header_buf = self
-            .output_buffers
-            .first()
+            .out_buf
+            .as_ref()
             .ok_or(VirtioDeviceError::QueueUnknownError)?;
         out_header_buf
             .mem_obj()
@@ -118,6 +130,11 @@ impl FuseRequest {
         Ok(out_header)
     }
 
+    pub(super) fn reply_payload_len(&self) -> Result<usize, VirtioDeviceError> {
+        let out_header = self.check_reply()?;
+        Ok((out_header.len as usize).saturating_sub(size_of::<OutHeader>()))
+    }
+
     pub(super) fn read_payload<T: Pod>(&self, offset: usize) -> Result<T, VirtioDeviceError> {
         let mut value = T::new_zeroed();
         self.read_payload_bytes(offset, value.as_mut_bytes())?;
@@ -133,59 +150,35 @@ impl FuseRequest {
             return Ok(());
         }
 
-        let end_offset = offset
+        let payload_buf = self
+            .out_buf
+            .as_ref()
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let payload_offset = size_of::<OutHeader>()
+            .checked_add(offset)
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let end_offset = payload_offset
             .checked_add(dst.len())
             .ok_or(VirtioDeviceError::QueueUnknownError)?;
-        let mut payload_offset = 0usize;
-        let mut copied = 0usize;
-
-        for (index, payload_buf) in self.output_buffers.iter().enumerate() {
-            let buf_payload_offset = if index == 0 {
-                size_of::<OutHeader>()
-            } else {
-                0
-            };
-            let buf_payload_len = payload_buf.size().saturating_sub(buf_payload_offset);
-            if buf_payload_len == 0 {
-                continue;
-            }
-
-            let next_payload_offset = payload_offset
-                .checked_add(buf_payload_len)
-                .ok_or(VirtioDeviceError::QueueUnknownError)?;
-            let read_start = cmp::max(offset, payload_offset);
-            let read_end = cmp::min(end_offset, next_payload_offset);
-
-            if read_start < read_end {
-                payload_buf
-                    .mem_obj()
-                    .sync_from_device(payload_buf.offset().clone())
-                    .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
-
-                let local_offset = buf_payload_offset + read_start - payload_offset;
-                let copy_len = read_end - read_start;
-                payload_buf
-                    .read_bytes(local_offset, &mut dst[copied..copied + copy_len])
-                    .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
-                copied += copy_len;
-
-                if copied == dst.len() {
-                    return Ok(());
-                }
-            }
-
-            payload_offset = next_payload_offset;
+        if end_offset > payload_buf.size() {
+            return Err(VirtioDeviceError::QueueUnknownError);
         }
 
-        Err(VirtioDeviceError::QueueUnknownError)
+        payload_buf
+            .mem_obj()
+            .sync_from_device(payload_buf.offset().clone())
+            .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
+        payload_buf
+            .read_bytes(payload_offset, dst)
+            .map_err(|_| VirtioDeviceError::QueueUnknownError)
     }
 
     fn new(unique: u64, nodeid: u64, in_buf: FsInBuf, out_buf: Option<FsOutBuf>) -> Self {
         Self {
             unique,
             nodeid,
-            input_buffers: vec![in_buf],
-            output_buffers: out_buf.into_iter().collect(),
+            in_buf,
+            out_buf,
             wait_state: SpinLock::new(RequestWaitState {
                 completed: false,
                 waker: None,
@@ -236,7 +229,7 @@ impl FuseRequest {
     }
 }
 
-impl InFlightRequest for FuseRequest {
+impl FuseRequest {
     fn mark_completed(&self) {
         let waker = {
             let mut wait_state = self.wait_state.lock();
@@ -252,7 +245,7 @@ impl InFlightRequest for FuseRequest {
 
 struct FsRequestQueue {
     queue: SpinLock<VirtQueue, LocalIrqDisabled>,
-    in_flight_requests: SpinLock<Vec<Option<Arc<dyn InFlightRequest>>>, LocalIrqDisabled>,
+    in_flight_requests: SpinLock<Vec<Option<Arc<FuseRequest>>>, LocalIrqDisabled>,
 }
 
 impl FsRequestQueue {
@@ -310,8 +303,7 @@ impl FileSystemDevice {
         &self,
         operation: Op,
     ) -> Result<Op::Output, VirtioDeviceError> {
-        let request = operation.build_request(self)?;
-        let request = Arc::new(request);
+        let request = Arc::new(operation.request(self)?);
         let request_queue_count = self.request_queues.len();
         let queue_index = if request_queue_count <= 1 {
             0
@@ -320,9 +312,9 @@ impl FileSystemDevice {
         };
         self.submit_to_queue(&self.request_queues[queue_index], request.clone())?;
         request.wait()?;
-        let out_header = request.check_reply()?;
+        request.check_reply()?;
 
-        operation.decode_reply(&request, out_header)
+        operation.parse_reply(&request)
     }
 }
 

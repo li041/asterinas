@@ -11,13 +11,7 @@ use ostd_pod::{IntoBytes, Pod};
 
 use super::*;
 
-fn read_reply_payload<T: Pod>(
-    request: &FuseRequest,
-    out_header: OutHeader,
-) -> Result<T, VirtioDeviceError> {
-    let _ = out_header;
-    request.read_payload(0)
-}
+const NAME_TERMINATOR: &[u8] = &[0];
 
 struct InitOperation {
     init_in: InitIn,
@@ -26,21 +20,20 @@ struct InitOperation {
 impl FuseOperation for InitOperation {
     type Output = InitOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Init as u32,
-            0,
-            &[self.init_in.as_bytes()],
-            Some(size_of::<InitOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Init
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        0
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.init_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<InitOut>())
     }
 }
 
@@ -52,21 +45,20 @@ struct LookupOperation<'a> {
 impl FuseOperation for LookupOperation<'_> {
     type Output = EntryOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Lookup as u32,
-            self.parent_nodeid,
-            &[self.name.as_bytes(), &[0]],
-            Some(size_of::<EntryOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Lookup
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.name.as_bytes(), NAME_TERMINATOR]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<EntryOut>())
     }
 }
 
@@ -79,21 +71,24 @@ struct MkdirOperation<'a> {
 impl FuseOperation for MkdirOperation<'_> {
     type Output = EntryOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Mkdir as u32,
-            self.parent_nodeid,
-            &[self.mkdir_in.as_bytes(), self.name.as_bytes(), &[0]],
-            Some(size_of::<EntryOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Mkdir
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![
+            self.mkdir_in.as_bytes(),
+            self.name.as_bytes(),
+            NAME_TERMINATOR,
+        ]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<EntryOut>())
     }
 }
 
@@ -106,21 +101,24 @@ struct MknodOperation<'a> {
 impl FuseOperation for MknodOperation<'_> {
     type Output = EntryOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Mknod as u32,
-            self.parent_nodeid,
-            &[self.mknod_in.as_bytes(), self.name.as_bytes(), &[0]],
-            Some(size_of::<EntryOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Mknod
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![
+            self.mknod_in.as_bytes(),
+            self.name.as_bytes(),
+            NAME_TERMINATOR,
+        ]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<EntryOut>())
     }
 }
 
@@ -132,21 +130,23 @@ struct UnlinkOperation<'a> {
 impl FuseOperation for UnlinkOperation<'_> {
     type Output = ();
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Unlink as u32,
-            self.parent_nodeid,
-            &[self.name.as_bytes(), &[0]],
-            Some(0),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Unlink
     }
 
-    fn decode_reply(
-        self,
-        _request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let _ = out_header;
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.name.as_bytes(), NAME_TERMINATOR]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn parse_reply(self, _request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
         Ok(())
     }
 }
@@ -159,21 +159,23 @@ struct RmdirOperation<'a> {
 impl FuseOperation for RmdirOperation<'_> {
     type Output = ();
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Rmdir as u32,
-            self.parent_nodeid,
-            &[self.name.as_bytes(), &[0]],
-            Some(0),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Rmdir
     }
 
-    fn decode_reply(
-        self,
-        _request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let _ = out_header;
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.name.as_bytes(), NAME_TERMINATOR]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn parse_reply(self, _request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
         Ok(())
     }
 }
@@ -187,21 +189,27 @@ struct CreateOperation<'a> {
 impl FuseOperation for CreateOperation<'_> {
     type Output = (EntryOut, OpenOut);
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Create as u32,
-            self.parent_nodeid,
-            &[self.create_in.as_bytes(), self.name.as_bytes(), &[0]],
-            Some(size_of::<EntryOut>() + size_of::<OpenOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Create
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let _ = out_header;
+    fn nodeid(&self) -> u64 {
+        self.parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![
+            self.create_in.as_bytes(),
+            self.name.as_bytes(),
+            NAME_TERMINATOR,
+        ]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<EntryOut>() + size_of::<OpenOut>())
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
         let entry_out = request.read_payload(0)?;
         let open_out = request.read_payload(size_of::<EntryOut>())?;
         Ok((entry_out, open_out))
@@ -216,21 +224,20 @@ struct GetattrOperation {
 impl FuseOperation for GetattrOperation {
     type Output = FuseAttrOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Getattr as u32,
-            self.nodeid,
-            &[self.getattr_in.as_bytes()],
-            Some(size_of::<FuseAttrOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Getattr
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.getattr_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<FuseAttrOut>())
     }
 }
 
@@ -242,21 +249,20 @@ struct SetattrOperation {
 impl FuseOperation for SetattrOperation {
     type Output = FuseAttrOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Setattr as u32,
-            self.nodeid,
-            &[self.setattr_in.as_bytes()],
-            Some(size_of::<FuseAttrOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Setattr
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.setattr_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<FuseAttrOut>())
     }
 }
 
@@ -268,21 +274,24 @@ struct OpendirOperation {
 impl FuseOperation for OpendirOperation {
     type Output = u64;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Opendir as u32,
-            self.nodeid,
-            &[self.open_in.as_bytes()],
-            Some(size_of::<OpenOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Opendir
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let open_out: OpenOut = read_reply_payload(request, out_header)?;
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.open_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<OpenOut>())
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let open_out: OpenOut = request.read_payload(0)?;
         Ok(open_out.fh)
     }
 }
@@ -296,21 +305,24 @@ struct ReaddirOperation {
 impl FuseOperation for ReaddirOperation {
     type Output = Vec<VirtioFsDirEntry>;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Readdir as u32,
-            self.nodeid,
-            &[self.read_in.as_bytes()],
-            Some(self.size),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Readdir
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.read_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(self.size)
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let payload_len = request.reply_payload_len()?;
         let payload_len = cmp::min(payload_len, self.size);
         let mut payload = vec![0u8; payload_len];
         request.read_payload_bytes(0, payload.as_mut_slice())?;
@@ -354,20 +366,23 @@ struct ReleasedirOperation {
 impl FuseOperation for ReleasedirOperation {
     type Output = ();
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Releasedir as u32,
-            self.nodeid,
-            &[self.release_in.as_bytes()],
-            Some(0),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Releasedir
     }
 
-    fn decode_reply(
-        self,
-        _request: &FuseRequest,
-        _out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.release_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn parse_reply(self, _request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
         Ok(())
     }
 }
@@ -379,16 +394,24 @@ struct ReadlinkOperation {
 impl FuseOperation for ReadlinkOperation {
     type Output = String;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(FuseOpcode::Readlink as u32, self.nodeid, &[], Some(4096))
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Readlink
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(4096)
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let payload_len = request.reply_payload_len()?;
         let mut payload = vec![0u8; payload_len];
         request.read_payload_bytes(0, payload.as_mut_slice())?;
 
@@ -409,21 +432,24 @@ struct LinkOperation<'a> {
 impl FuseOperation for LinkOperation<'_> {
     type Output = EntryOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Link as u32,
-            self.new_parent_nodeid,
-            &[self.link_in.as_bytes(), self.new_name.as_bytes(), &[0]],
-            Some(size_of::<EntryOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Link
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.new_parent_nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![
+            self.link_in.as_bytes(),
+            self.new_name.as_bytes(),
+            NAME_TERMINATOR,
+        ]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<EntryOut>())
     }
 }
 
@@ -435,21 +461,20 @@ struct OpenOperation {
 impl FuseOperation for OpenOperation {
     type Output = OpenOut;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Open as u32,
-            self.nodeid,
-            &[self.open_in.as_bytes()],
-            Some(size_of::<OpenOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Open
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        read_reply_payload(request, out_header)
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.open_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<OpenOut>())
     }
 }
 
@@ -461,21 +486,23 @@ struct ReleaseOperation {
 impl FuseOperation for ReleaseOperation {
     type Output = ();
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Release as u32,
-            self.nodeid,
-            &[self.release_in.as_bytes()],
-            Some(0),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Release
     }
 
-    fn decode_reply(
-        self,
-        _request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let _ = out_header;
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.release_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(0)
+    }
+
+    fn parse_reply(self, _request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
         Ok(())
     }
 }
@@ -488,21 +515,24 @@ struct LseekOperation {
 impl FuseOperation for LseekOperation {
     type Output = i64;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Lseek as u32,
-            self.nodeid,
-            &[self.lseek_in.as_bytes()],
-            Some(size_of::<LseekOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Lseek
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let lseek_out: LseekOut = read_reply_payload(request, out_header)?;
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.lseek_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<LseekOut>())
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let lseek_out: LseekOut = request.read_payload(0)?;
         Ok(lseek_out.offset)
     }
 }
@@ -516,21 +546,24 @@ struct ReadOperation {
 impl FuseOperation for ReadOperation {
     type Output = Vec<u8>;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Read as u32,
-            self.nodeid,
-            &[self.read_in.as_bytes()],
-            Some(self.size),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Read
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.read_in.as_bytes()]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(self.size)
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let payload_len = request.reply_payload_len()?;
         let payload_len = cmp::min(payload_len, self.size);
         let mut content = vec![0u8; payload_len];
         request.read_payload_bytes(0, content.as_mut_slice())?;
@@ -547,21 +580,24 @@ struct WriteOperation<'a> {
 impl FuseOperation for WriteOperation<'_> {
     type Output = usize;
 
-    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
-        fs.prepare_fuse_request(
-            FuseOpcode::Write as u32,
-            self.nodeid,
-            &[self.write_in.as_bytes(), self.data],
-            Some(size_of::<WriteOut>()),
-        )
+    fn opcode(&self) -> FuseOpcode {
+        FuseOpcode::Write
     }
 
-    fn decode_reply(
-        self,
-        request: &FuseRequest,
-        out_header: OutHeader,
-    ) -> Result<Self::Output, VirtioDeviceError> {
-        let write_out: WriteOut = read_reply_payload(request, out_header)?;
+    fn nodeid(&self) -> u64 {
+        self.nodeid
+    }
+
+    fn body_segments(&self) -> Vec<&[u8]> {
+        vec![self.write_in.as_bytes(), self.data]
+    }
+
+    fn out_payload_size(&self) -> Option<usize> {
+        Some(size_of::<WriteOut>())
+    }
+
+    fn parse_reply(self, request: &FuseRequest) -> Result<Self::Output, VirtioDeviceError> {
+        let write_out: WriteOut = request.read_payload(0)?;
         Ok(write_out.size as usize)
     }
 }
@@ -571,7 +607,7 @@ impl FileSystemDevice {
         let operation = InitOperation {
             init_in: InitIn::new(FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION, 0, 0, 0),
         };
-        let request = operation.build_request(self)?;
+        let request = operation.request(self)?;
         let request = alloc::sync::Arc::new(request);
         self.submit_to_queue(&self.request_queues[0], request.clone())?;
         loop {
@@ -583,7 +619,8 @@ impl FileSystemDevice {
 
             core::hint::spin_loop();
         }
-        let init_out = operation.decode_reply(&request, request.check_reply()?)?;
+        request.check_reply()?;
+        let init_out = operation.parse_reply(&request)?;
 
         info!(
             "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",

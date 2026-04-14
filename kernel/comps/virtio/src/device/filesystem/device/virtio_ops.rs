@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use core::cmp;
+
 use super::*;
 
 impl FileSystemDevice {
@@ -136,9 +138,11 @@ impl FileSystemDevice {
         request: Arc<FuseRequest>,
     ) -> Result<Arc<FuseRequest>, VirtioDeviceError> {
         let mut virt_queue = queue.queue.lock();
-        let input_slices: Vec<_> = request.input_buffers.iter().collect();
-        let output_slices: Vec<_> = request.output_buffers.iter().collect();
-        let token = virt_queue.add_dma_buf(input_slices.as_slice(), output_slices.as_slice())?;
+        let input_slices = [&request.in_buf];
+        let token = match request.out_buf.as_ref() {
+            Some(out_buf) => virt_queue.add_dma_buf(&input_slices, &[out_buf])?,
+            None => virt_queue.add_dma_buf(&input_slices, &[] as &[&FsOutBuf])?,
+        };
         let token_idx = token as usize;
 
         let mut in_flight_requests = queue.in_flight_requests.lock();
@@ -149,10 +153,7 @@ impl FileSystemDevice {
             );
             return Err(VirtioDeviceError::QueueUnknownError);
         };
-        if slot
-            .replace(request.clone() as Arc<dyn InFlightRequest>)
-            .is_some()
-        {
+        if slot.replace(request.clone()).is_some() {
             warn!(
                 "{} unexpectedly reused an in-flight token: token={}",
                 DEVICE_NAME, token
