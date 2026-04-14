@@ -9,7 +9,6 @@ use alloc::{
 };
 use core::{
     cmp,
-    hint::spin_loop,
     mem::size_of,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -19,9 +18,8 @@ use ostd::{
     arch::trap::TrapFrame,
     debug, info,
     mm::{
-        HasSize, VmIo, VmReader,
+        HasSize, VmIo,
         dma::{FromDevice, ToDevice},
-        io::util::HasVmReaderWriter,
     },
     sync::{LocalIrqDisabled, SpinLock, Waiter, Waker},
     timer::{Jiffies, TIMER_FREQ},
@@ -64,25 +62,32 @@ struct RequestWaitState {
     waker: Option<Arc<Waker>>,
 }
 
-struct FsRequest {
-    _input_buffers: Vec<FsInBuf>,
+trait InFlightRequest: Send + Sync {
+    fn mark_completed(&self);
+}
+
+pub(super) trait FuseOperation {
+    type Output;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError>;
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError>;
+}
+
+pub(super) struct FuseRequest {
+    unique: u64,
+    nodeid: u64,
+    input_buffers: Vec<FsInBuf>,
     output_buffers: Vec<FsOutBuf>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
-impl FsRequest {
-    fn new(input_buffers: Vec<FsInBuf>, output_buffers: Vec<FsOutBuf>) -> Arc<Self> {
-        Arc::new(Self {
-            _input_buffers: input_buffers,
-            output_buffers,
-            wait_state: SpinLock::new(RequestWaitState {
-                completed: false,
-                waker: None,
-            }),
-        })
-    }
-
-    fn check_reply(&self, unique: u64) -> Result<OutHeader, VirtioDeviceError> {
+impl FuseRequest {
+    pub(super) fn check_reply(&self) -> Result<OutHeader, VirtioDeviceError> {
         let out_header_buf = self
             .output_buffers
             .first()
@@ -95,7 +100,7 @@ impl FsRequest {
         let out_header: OutHeader = out_header_buf
             .read_val(0)
             .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
-        if out_header.unique != unique {
+        if out_header.unique != self.unique {
             warn!(
                 "{} failed: unique={}, error={}, out_len={}",
                 DEVICE_NAME, out_header.unique, out_header.error, out_header.len
@@ -113,13 +118,17 @@ impl FsRequest {
         Ok(out_header)
     }
 
-    fn read_payload<T: Pod>(&self, offset: usize) -> Result<T, VirtioDeviceError> {
+    pub(super) fn read_payload<T: Pod>(&self, offset: usize) -> Result<T, VirtioDeviceError> {
         let mut value = T::new_zeroed();
         self.read_payload_bytes(offset, value.as_mut_bytes())?;
         Ok(value)
     }
 
-    fn read_payload_bytes(&self, offset: usize, dst: &mut [u8]) -> Result<(), VirtioDeviceError> {
+    pub(super) fn read_payload_bytes(
+        &self,
+        offset: usize,
+        dst: &mut [u8],
+    ) -> Result<(), VirtioDeviceError> {
         if dst.is_empty() {
             return Ok(());
         }
@@ -130,9 +139,19 @@ impl FsRequest {
         let mut payload_offset = 0usize;
         let mut copied = 0usize;
 
-        for payload_buf in self.output_buffers.iter().skip(1) {
+        for (index, payload_buf) in self.output_buffers.iter().enumerate() {
+            let buf_payload_offset = if index == 0 {
+                size_of::<OutHeader>()
+            } else {
+                0
+            };
+            let buf_payload_len = payload_buf.size().saturating_sub(buf_payload_offset);
+            if buf_payload_len == 0 {
+                continue;
+            }
+
             let next_payload_offset = payload_offset
-                .checked_add(payload_buf.size())
+                .checked_add(buf_payload_len)
                 .ok_or(VirtioDeviceError::QueueUnknownError)?;
             let read_start = cmp::max(offset, payload_offset);
             let read_end = cmp::min(end_offset, next_payload_offset);
@@ -143,7 +162,7 @@ impl FsRequest {
                     .sync_from_device(payload_buf.offset().clone())
                     .map_err(|_| VirtioDeviceError::QueueUnknownError)?;
 
-                let local_offset = read_start - payload_offset;
+                let local_offset = buf_payload_offset + read_start - payload_offset;
                 let copy_len = read_end - read_start;
                 payload_buf
                     .read_bytes(local_offset, &mut dst[copied..copied + copy_len])
@@ -160,11 +179,80 @@ impl FsRequest {
 
         Err(VirtioDeviceError::QueueUnknownError)
     }
+
+    fn new(unique: u64, nodeid: u64, in_buf: FsInBuf, out_buf: Option<FsOutBuf>) -> Self {
+        Self {
+            unique,
+            nodeid,
+            input_buffers: vec![in_buf],
+            output_buffers: out_buf.into_iter().collect(),
+            wait_state: SpinLock::new(RequestWaitState {
+                completed: false,
+                waker: None,
+            }),
+        }
+    }
+
+    pub(super) fn wait(&self) -> Result<(), VirtioDeviceError> {
+        let mut wait_state = self.wait_state.lock();
+        if wait_state.completed {
+            return Ok(());
+        }
+        let (waiter, waker) = Waiter::new_pair();
+        wait_state.waker = Some(waker);
+        drop(wait_state);
+
+        let timeout_deadline = Jiffies::elapsed()
+            .as_u64()
+            .saturating_add(REQUEST_WAIT_TIMEOUT_JIFFIES);
+
+        let wait_res = waiter.wait_until_or_cancelled(
+            || {
+                if self.wait_state.lock().completed {
+                    return Some(());
+                }
+                None
+            },
+            || {
+                if Jiffies::elapsed().as_u64() >= timeout_deadline {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        if wait_res.is_ok() {
+            return Ok(());
+        }
+
+        let mut wait_state = self.wait_state.lock();
+        if wait_state.completed {
+            return Ok(());
+        }
+        wait_state.waker = None;
+
+        Err(VirtioDeviceError::QueueUnknownError)
+    }
+}
+
+impl InFlightRequest for FuseRequest {
+    fn mark_completed(&self) {
+        let waker = {
+            let mut wait_state = self.wait_state.lock();
+            wait_state.completed = true;
+            wait_state.waker.take()
+        };
+
+        if let Some(waker) = waker {
+            let _ = waker.wake_up();
+        }
+    }
 }
 
 struct FsRequestQueue {
     queue: SpinLock<VirtQueue, LocalIrqDisabled>,
-    in_flight_requests: SpinLock<Vec<Option<Arc<FsRequest>>>, LocalIrqDisabled>,
+    in_flight_requests: SpinLock<Vec<Option<Arc<dyn InFlightRequest>>>, LocalIrqDisabled>,
 }
 
 impl FsRequestQueue {
@@ -194,12 +282,6 @@ impl core::fmt::Debug for FsRequestQueue {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum QueueSelector {
-    Hiprio,
-    Request(usize),
-}
-
 pub struct FileSystemDevice {
     transport: SpinLock<Box<dyn VirtioTransport>, LocalIrqDisabled>,
     hiprio_queue: FsRequestQueue,
@@ -223,6 +305,27 @@ impl core::fmt::Debug for FileSystemDevice {
     }
 }
 
+impl FileSystemDevice {
+    pub(super) fn execute<Op: FuseOperation>(
+        &self,
+        operation: Op,
+    ) -> Result<Op::Output, VirtioDeviceError> {
+        let request = operation.build_request(self)?;
+        let request = Arc::new(request);
+        let request_queue_count = self.request_queues.len();
+        let queue_index = if request_queue_count <= 1 {
+            0
+        } else {
+            (request.nodeid as usize) % request_queue_count
+        };
+        self.submit_to_queue(&self.request_queues[queue_index], request.clone())?;
+        request.wait()?;
+        let out_header = request.check_reply()?;
+
+        operation.decode_reply(&request, out_header)
+    }
+}
+
 mod client;
 mod helpers;
 mod virtio_ops;
@@ -231,12 +334,4 @@ pub fn get_device_by_tag(tag: &str) -> Option<Arc<FileSystemDevice>> {
     let devices = FILESYSTEM_DEVICES.get()?;
     let devices = devices.disable_irq().lock();
     devices.iter().find(|device| device.tag == tag).cloned()
-}
-
-fn config_space_change(_: &TrapFrame) {
-    debug!("Virtio-FS device configuration space change");
-}
-
-fn map_transport_err(_: VirtioTransportError) -> VirtioDeviceError {
-    VirtioDeviceError::QueueUnknownError
 }

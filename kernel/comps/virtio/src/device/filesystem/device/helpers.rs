@@ -2,9 +2,6 @@
 
 use super::*;
 
-// (in_header, in_payload, out_header, out_payload)
-type FsRequestSlices = (FsInBuf, FsInBuf, FsOutBuf, FsOutBuf);
-
 impl FileSystemDevice {
     pub(super) fn parse_tag(raw_tag: &[u8; 36]) -> &str {
         let len = raw_tag
@@ -22,93 +19,68 @@ impl FileSystemDevice {
         self.next_unique.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub(super) fn prepare_in_header_buf(
+    pub(super) fn prepare_in_buf(
         &self,
         in_header: InHeader,
+        body_segments: &[&[u8]],
     ) -> Result<FsInBuf, VirtioDeviceError> {
-        let in_header_buf = self.alloc_to_device_buf(size_of::<InHeader>())?;
-        in_header_buf.write_val(0, &in_header).unwrap();
-        in_header_buf
-            .mem_obj()
-            .sync_to_device(in_header_buf.offset().clone())
-            .unwrap();
-        Ok(in_header_buf)
-    }
+        let body_len = body_segments
+            .iter()
+            .try_fold(0usize, |len, segment| len.checked_add(segment.len()))
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let total_len = size_of::<InHeader>()
+            .checked_add(body_len)
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let in_buf = self.alloc_to_device_buf(total_len)?;
 
-    pub(super) fn prepare_in_payload_buf<T: Pod>(
-        &self,
-        in_payload: T,
-    ) -> Result<FsInBuf, VirtioDeviceError> {
-        let in_payload_buf = self.alloc_to_device_buf(size_of::<T>())?;
-        in_payload_buf.write_val(0, &in_payload).unwrap();
-        in_payload_buf
-            .mem_obj()
-            .sync_to_device(in_payload_buf.offset().clone())
-            .unwrap();
-        Ok(in_payload_buf)
-    }
+        in_buf.write_val(0, &in_header).unwrap();
 
-    pub(super) fn prepare_in_name_buf(&self, name: &str) -> Result<FsInBuf, VirtioDeviceError> {
-        let in_name_buf = self.alloc_to_device_buf(name.len() + 1)?;
-
-        {
-            let mut writer = in_name_buf.writer().unwrap();
-            let mut value_reader = VmReader::from(name.as_bytes());
-            let _ = writer.write(&mut value_reader);
-            let nul: [u8; 1] = [0u8];
-            let mut nul_reader = VmReader::from(&nul[..]);
-            let _ = writer.write(&mut nul_reader);
+        let mut offset = size_of::<InHeader>();
+        for segment in body_segments {
+            in_buf.write_bytes(offset, segment).unwrap();
+            offset += segment.len();
         }
 
-        in_name_buf
+        in_buf
             .mem_obj()
-            .sync_to_device(in_name_buf.offset().clone())
+            .sync_to_device(in_buf.offset().clone())
             .unwrap();
 
-        Ok(in_name_buf)
+        Ok(in_buf)
     }
 
-    pub(super) fn prepare_in_data_buf(&self, data: &[u8]) -> Result<FsInBuf, VirtioDeviceError> {
-        let in_data_buf = self.alloc_to_device_buf(data.len())?;
-        {
-            let mut writer = in_data_buf.writer().unwrap();
-            let mut data_reader = VmReader::from(data);
-            let _ = writer.write(&mut data_reader);
-        }
-        in_data_buf
-            .mem_obj()
-            .sync_to_device(in_data_buf.offset().clone())
-            .unwrap();
-        Ok(in_data_buf)
-    }
-
-    pub(super) fn prepare_out_header_buf(&self) -> Result<FsOutBuf, VirtioDeviceError> {
-        self.alloc_from_device_buf(size_of::<OutHeader>())
-    }
-
-    pub(super) fn prepare_out_payload_buf(
+    pub(super) fn prepare_out_buf(
         &self,
-        size: usize,
+        payload_size: usize,
     ) -> Result<FsOutBuf, VirtioDeviceError> {
-        self.alloc_from_device_buf(size)
+        let total_len = size_of::<OutHeader>()
+            .checked_add(payload_size)
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        self.alloc_from_device_buf(total_len)
     }
 
-    pub(super) fn prepare_request_slices<T: Pod>(
+    pub(super) fn prepare_fuse_request(
         &self,
-        in_header: InHeader,
-        in_payload: T,
-        out_payload_size: usize,
-    ) -> Result<FsRequestSlices, VirtioDeviceError> {
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_payload_slice = self.prepare_in_payload_buf(in_payload)?;
-        let out_header_slice = self.prepare_out_header_buf()?;
-        let out_payload_slice = self.prepare_out_payload_buf(out_payload_size)?;
-        Ok((
-            in_header_slice,
-            in_payload_slice,
-            out_header_slice,
-            out_payload_slice,
-        ))
+        opcode: u32,
+        nodeid: u64,
+        body_segments: &[&[u8]],
+        out_payload_size: Option<usize>,
+    ) -> Result<FuseRequest, VirtioDeviceError> {
+        let unique = self.alloc_unique();
+        let body_len = body_segments
+            .iter()
+            .try_fold(0usize, |len, segment| len.checked_add(segment.len()))
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let in_len = size_of::<InHeader>()
+            .checked_add(body_len)
+            .ok_or(VirtioDeviceError::QueueUnknownError)?;
+        let in_header = InHeader::new(in_len as u32, opcode, unique, nodeid);
+        let in_buf = self.prepare_in_buf(in_header, body_segments)?;
+        let out_buf = out_payload_size
+            .map(|payload_size| self.prepare_out_buf(payload_size))
+            .transpose()?;
+
+        Ok(FuseRequest::new(unique, nodeid, in_buf, out_buf))
     }
 
     fn alloc_to_device_buf(&self, len: usize) -> Result<FsInBuf, VirtioDeviceError> {

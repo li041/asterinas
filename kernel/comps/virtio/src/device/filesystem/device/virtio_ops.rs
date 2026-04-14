@@ -63,11 +63,13 @@ impl FileSystemDevice {
 
         let mut transport = device.transport.lock();
         transport
-            .register_cfg_callback(Box::new(config_space_change))
+            .register_cfg_callback(Box::new(|_: &TrapFrame| {
+                debug!("Virtio-FS device configuration space change");
+            }))
             .unwrap();
         let device_for_hiprio_callback = device.clone();
         let hiprio_wakeup_callback = move |_: &TrapFrame| {
-            device_for_hiprio_callback.handle_queue_irq(QueueSelector::Hiprio);
+            device_for_hiprio_callback.handle_queue_irq(&device_for_hiprio_callback.hiprio_queue);
         };
         transport
             .register_queue_callback(HIPRIO_QUEUE_INDEX, Box::new(hiprio_wakeup_callback), false)
@@ -76,9 +78,10 @@ impl FileSystemDevice {
             let queue_idx = special_queues_count + idx as u16;
             let device_for_callback = device.clone();
             let wakeup_callback = move |_: &TrapFrame| {
-                device_for_callback.handle_queue_irq(QueueSelector::Request(
-                    (queue_idx - special_queues_count) as usize,
-                ));
+                device_for_callback.handle_queue_irq(
+                    &device_for_callback.request_queues
+                        [(queue_idx - special_queues_count) as usize],
+                );
             };
             transport
                 .register_queue_callback(queue_idx, Box::new(wakeup_callback), false)
@@ -117,7 +120,9 @@ impl FileSystemDevice {
         index: u16,
         transport: &mut dyn VirtioTransport,
     ) -> Result<VirtQueue, VirtioDeviceError> {
-        let max_queue_size = transport.max_queue_size(index).map_err(map_transport_err)?;
+        let max_queue_size = transport
+            .max_queue_size(index)
+            .map_err(|_: VirtioTransportError| VirtioDeviceError::QueueUnknownError)?;
         let queue_size = cmp::min(DEFAULT_QUEUE_SIZE, max_queue_size);
         if queue_size == 0 {
             return Err(VirtioDeviceError::QueueUnknownError);
@@ -125,78 +130,44 @@ impl FileSystemDevice {
         VirtQueue::new(index, queue_size, transport).map_err(Into::into)
     }
 
-    pub(super) fn queue(&self, selector: QueueSelector) -> &FsRequestQueue {
-        match selector {
-            QueueSelector::Hiprio => &self.hiprio_queue,
-            QueueSelector::Request(index) => &self.request_queues[index],
-        }
-    }
-
-    pub(super) fn select_request_queue(&self, nodeid: u64) -> QueueSelector {
-        let request_queue_count = self.request_queues.len();
-        if request_queue_count <= 1 {
-            return QueueSelector::Request(0);
-        }
-
-        QueueSelector::Request((nodeid as usize) % request_queue_count)
-    }
-
-    pub(super) fn submit_request(
+    pub(super) fn submit_to_queue(
         &self,
-        selector: QueueSelector,
-        unique: u64,
-        input_buffers: Vec<FsInBuf>,
-        output_buffers: Vec<FsOutBuf>,
-    ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
-        let queue = self.queue(selector);
+        queue: &FsRequestQueue,
+        request: Arc<FuseRequest>,
+    ) -> Result<Arc<FuseRequest>, VirtioDeviceError> {
+        let mut virt_queue = queue.queue.lock();
+        let input_slices: Vec<_> = request.input_buffers.iter().collect();
+        let output_slices: Vec<_> = request.output_buffers.iter().collect();
+        let token = virt_queue.add_dma_buf(input_slices.as_slice(), output_slices.as_slice())?;
+        let token_idx = token as usize;
 
+        let mut in_flight_requests = queue.in_flight_requests.lock();
+        let Some(slot) = in_flight_requests.get_mut(token_idx) else {
+            warn!(
+                "{} returned an out-of-range token: token={}",
+                DEVICE_NAME, token
+            );
+            return Err(VirtioDeviceError::QueueUnknownError);
+        };
+        if slot
+            .replace(request.clone() as Arc<dyn InFlightRequest>)
+            .is_some()
         {
-            let mut virt_queue = queue.queue.lock();
-            let input_slices: Vec<_> = input_buffers.iter().collect();
-            let output_slices: Vec<_> = output_buffers.iter().collect();
-
-            let token =
-                virt_queue.add_dma_buf(input_slices.as_slice(), output_slices.as_slice())?;
-            let token_idx = token as usize;
-            let request = FsRequest::new(input_buffers, output_buffers);
-
-            let mut in_flight_requests = queue.in_flight_requests.lock();
-            let Some(slot) = in_flight_requests.get_mut(token_idx) else {
-                warn!(
-                    "{} returned an out-of-range token: queue={:?}, token={}, unique={}",
-                    DEVICE_NAME, selector, token, unique
-                );
-                return Err(VirtioDeviceError::QueueUnknownError);
-            };
-            if slot.replace(request.clone()).is_some() {
-                warn!(
-                    "{} unexpectedly reused an in-flight token: queue={:?}, token={}, unique={}",
-                    DEVICE_NAME, selector, token, unique
-                );
-                return Err(VirtioDeviceError::QueueUnknownError);
-            }
-
-            if virt_queue.should_notify() {
-                virt_queue.notify();
-            }
-
-            Ok(request)
+            warn!(
+                "{} unexpectedly reused an in-flight token: token={}",
+                DEVICE_NAME, token
+            );
+            return Err(VirtioDeviceError::QueueUnknownError);
         }
+
+        if virt_queue.should_notify() {
+            virt_queue.notify();
+        }
+
+        Ok(request)
     }
 
-    pub(super) fn submit_request_and_wait(
-        &self,
-        selector: QueueSelector,
-        unique: u64,
-        input_buffers: Vec<FsInBuf>,
-        output_buffers: Vec<FsOutBuf>,
-    ) -> Result<Arc<FsRequest>, VirtioDeviceError> {
-        let request = self.submit_request(selector, unique, input_buffers, output_buffers)?;
-        self.wait_for_request(&request).map(|_| request)
-    }
-
-    pub(super) fn handle_queue_irq(&self, selector: QueueSelector) {
-        let queue_state = self.queue(selector);
+    pub(super) fn handle_queue_irq(&self, queue_state: &FsRequestQueue) {
         loop {
             let token = {
                 let mut queue = queue_state.queue.lock();
@@ -210,88 +181,15 @@ impl FileSystemDevice {
             let mut in_flight_requests = queue_state.in_flight_requests.lock();
             let Some(slot) = in_flight_requests.get_mut(token as usize) else {
                 warn!(
-                    "{} completed an out-of-range token: queue={:?}, token={}",
-                    DEVICE_NAME, selector, token
+                    "{} completed an out-of-range token: token={}",
+                    DEVICE_NAME, token
                 );
                 continue;
             };
             let Some(request) = slot.take() else {
                 continue;
             };
-
-            let waker = {
-                let mut wait_state = request.wait_state.lock();
-                wait_state.completed = true;
-                wait_state.waker.take()
-            };
-
-            if let Some(waker) = waker {
-                let _ = waker.wake_up();
-            }
-        }
-    }
-
-    pub(super) fn wait_for_request(
-        &self,
-        request: &Arc<FsRequest>,
-    ) -> Result<(), VirtioDeviceError> {
-        let mut wait_state = request.wait_state.lock();
-        if wait_state.completed {
-            return Ok(());
-        }
-
-        let (waiter, waker) = Waiter::new_pair();
-        wait_state.waker = Some(waker);
-        drop(wait_state);
-
-        let timeout_deadline = Jiffies::elapsed()
-            .as_u64()
-            .saturating_add(REQUEST_WAIT_TIMEOUT_JIFFIES);
-
-        let wait_res = waiter.wait_until_or_cancelled(
-            || {
-                if request.wait_state.lock().completed {
-                    return Some(());
-                }
-                None
-            },
-            || {
-                if Jiffies::elapsed().as_u64() >= timeout_deadline {
-                    Err(())
-                } else {
-                    Ok(())
-                }
-            },
-        );
-
-        if wait_res.is_ok() {
-            return Ok(());
-        }
-
-        let mut wait_state = request.wait_state.lock();
-        if wait_state.completed {
-            return Ok(());
-        }
-        wait_state.waker = None;
-
-        Err(VirtioDeviceError::QueueUnknownError)
-    }
-
-    /// Wait for a reply from the device by spinning;
-    /// intended for early boot or non-task contexts.
-    pub(super) fn wait_for_request_early(
-        &self,
-        selector: QueueSelector,
-        request: &Arc<FsRequest>,
-    ) -> Result<(), VirtioDeviceError> {
-        loop {
-            self.handle_queue_irq(selector);
-
-            if request.wait_state.lock().completed {
-                return Ok(());
-            }
-
-            spin_loop();
+            request.mark_completed();
         }
     }
 }

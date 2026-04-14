@@ -1,359 +1,322 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use alloc::{
+    string::{String, ToString},
+    vec,
+    vec::Vec,
+};
+use core::{cmp, mem::size_of};
+
+use ostd_pod::{IntoBytes, Pod};
+
 use super::*;
 
-impl FileSystemDevice {
-    pub(crate) fn fuse_init(&self) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
+fn read_reply_payload<T: Pod>(
+    request: &FuseRequest,
+    out_header: OutHeader,
+) -> Result<T, VirtioDeviceError> {
+    let _ = out_header;
+    request.read_payload(0)
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<InitIn>()) as u32,
-            FuseOpcode::Init.into(),
-            unique,
+struct InitOperation {
+    init_in: InitIn,
+}
+
+impl FuseOperation for InitOperation {
+    type Output = InitOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Init as u32,
             0,
-        );
-        let init_in = InitIn::new(FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION, 0, 0, 0);
+            &[self.init_in.as_bytes()],
+            Some(size_of::<InitOut>()),
+        )
+    }
 
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, init_in, size_of::<InitOut>())?;
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
 
-        let selector = QueueSelector::Request(0);
-        let request = self.submit_request(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
+struct LookupOperation<'a> {
+    parent_nodeid: u64,
+    name: &'a str,
+}
 
-        self.wait_for_request_early(selector, &request)?;
-        request.check_reply(unique)?;
-        let init_out: InitOut = request.read_payload(0)?;
+impl FuseOperation for LookupOperation<'_> {
+    type Output = EntryOut;
 
-        info!(
-            "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",
-            DEVICE_NAME,
-            FUSE_KERNEL_VERSION,
-            FUSE_KERNEL_MINOR_VERSION,
-            init_out.major,
-            init_out.minor,
-            init_out.max_write,
-            init_out.flags,
-        );
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Lookup as u32,
+            self.parent_nodeid,
+            &[self.name.as_bytes(), &[0]],
+            Some(size_of::<EntryOut>()),
+        )
+    }
 
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
+
+struct MkdirOperation<'a> {
+    parent_nodeid: u64,
+    mkdir_in: MkdirIn,
+    name: &'a str,
+}
+
+impl FuseOperation for MkdirOperation<'_> {
+    type Output = EntryOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Mkdir as u32,
+            self.parent_nodeid,
+            &[self.mkdir_in.as_bytes(), self.name.as_bytes(), &[0]],
+            Some(size_of::<EntryOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
+
+struct MknodOperation<'a> {
+    parent_nodeid: u64,
+    mknod_in: MknodIn,
+    name: &'a str,
+}
+
+impl FuseOperation for MknodOperation<'_> {
+    type Output = EntryOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Mknod as u32,
+            self.parent_nodeid,
+            &[self.mknod_in.as_bytes(), self.name.as_bytes(), &[0]],
+            Some(size_of::<EntryOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
+
+struct UnlinkOperation<'a> {
+    parent_nodeid: u64,
+    name: &'a str,
+}
+
+impl FuseOperation for UnlinkOperation<'_> {
+    type Output = ();
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Unlink as u32,
+            self.parent_nodeid,
+            &[self.name.as_bytes(), &[0]],
+            Some(0),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        _request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let _ = out_header;
         Ok(())
     }
+}
 
-    pub fn fuse_lookup(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-    ) -> Result<EntryOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
+struct RmdirOperation<'a> {
+    parent_nodeid: u64,
+    name: &'a str,
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + name.len() + 1) as u32,
-            FuseOpcode::Lookup.into(),
-            unique,
-            parent_nodeid,
-        );
+impl FuseOperation for RmdirOperation<'_> {
+    type Output = ();
 
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let out_header_slice = self.prepare_out_header_buf()?;
-        let out_payload_slice = self.prepare_out_payload_buf(size_of::<EntryOut>())?;
-
-        let selector = self.select_request_queue(parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_name_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let entry_out: EntryOut = request.read_payload(0)?;
-
-        Ok(entry_out)
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Rmdir as u32,
+            self.parent_nodeid,
+            &[self.name.as_bytes(), &[0]],
+            Some(0),
+        )
     }
 
-    pub fn fuse_mkdir(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-        mode: u32,
-    ) -> Result<EntryOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<MkdirIn>() + name.len() + 1) as u32,
-            FuseOpcode::Mkdir.into(),
-            unique,
-            parent_nodeid,
-        );
-        let mkdir_in = MkdirIn::new(mode);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, mkdir_in, size_of::<EntryOut>())?;
-
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let selector = self.select_request_queue(parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice, in_name_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let entry_out: EntryOut = request.read_payload(0)?;
-
-        Ok(entry_out)
-    }
-
-    pub fn fuse_mknod(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-        mode: u32,
-        rdev: u32,
-    ) -> Result<EntryOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<MknodIn>() + name.len() + 1) as u32,
-            FuseOpcode::Mknod.into(),
-            unique,
-            parent_nodeid,
-        );
-        let mknod_in = MknodIn::new(mode, rdev);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, mknod_in, size_of::<EntryOut>())?;
-
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let selector = self.select_request_queue(parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice, in_name_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let entry_out: EntryOut = request.read_payload(0)?;
-
-        Ok(entry_out)
-    }
-
-    pub fn fuse_unlink(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + name.len() + 1) as u32,
-            FuseOpcode::Unlink.into(),
-            unique,
-            parent_nodeid,
-        );
-
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let out_header_slice = self.prepare_out_header_buf()?;
-
-        let selector = self.select_request_queue(parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_name_slice],
-            vec![out_header_slice],
-        )?;
-        request.check_reply(unique)?;
-
+    fn decode_reply(
+        self,
+        _request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let _ = out_header;
         Ok(())
     }
+}
 
-    pub fn fuse_rmdir(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
+struct CreateOperation<'a> {
+    parent_nodeid: u64,
+    create_in: CreateIn,
+    name: &'a str,
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + name.len() + 1) as u32,
-            FuseOpcode::Rmdir.into(),
-            unique,
-            parent_nodeid,
-        );
+impl FuseOperation for CreateOperation<'_> {
+    type Output = (EntryOut, OpenOut);
 
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let out_header_slice = self.prepare_out_header_buf()?;
-        let selector = self.select_request_queue(parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_name_slice],
-            vec![out_header_slice],
-        )?;
-        request.check_reply(unique)?;
-
-        Ok(())
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Create as u32,
+            self.parent_nodeid,
+            &[self.create_in.as_bytes(), self.name.as_bytes(), &[0]],
+            Some(size_of::<EntryOut>() + size_of::<OpenOut>()),
+        )
     }
 
-    pub fn fuse_create(
-        &self,
-        parent_nodeid: u64,
-        name: &str,
-        mode: u32,
-    ) -> Result<(EntryOut, OpenOut), VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<CreateIn>() + name.len() + 1) as u32,
-            FuseOpcode::Create.into(),
-            unique,
-            parent_nodeid,
-        );
-
-        let create_in = CreateIn::new(O_RDWR, mode);
-
-        let out_payload_size = size_of::<EntryOut>() + size_of::<OpenOut>();
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, create_in, out_payload_size)?;
-
-        let in_name_slice = self.prepare_in_name_buf(name)?;
-
-        let selector = self.select_request_queue(parent_nodeid);
-
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice, in_name_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let entry_out: EntryOut = request.read_payload(0)?;
-        let open_out: OpenOut = request.read_payload(size_of::<EntryOut>())?;
-
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let _ = out_header;
+        let entry_out = request.read_payload(0)?;
+        let open_out = request.read_payload(size_of::<EntryOut>())?;
         Ok((entry_out, open_out))
     }
+}
 
-    pub fn fuse_getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
+struct GetattrOperation {
+    nodeid: u64,
+    getattr_in: GetattrIn,
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<GetattrIn>()) as u32,
-            FuseOpcode::Getattr.into(),
-            unique,
-            nodeid,
-        );
-        let getattr_in = GetattrIn::new(0);
+impl FuseOperation for GetattrOperation {
+    type Output = FuseAttrOut;
 
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, getattr_in, size_of::<FuseAttrOut>())?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        request.read_payload(0)
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Getattr as u32,
+            self.nodeid,
+            &[self.getattr_in.as_bytes()],
+            Some(size_of::<FuseAttrOut>()),
+        )
     }
 
-    pub fn fuse_setattr(
-        &self,
-        nodeid: u64,
-        setattr_in: SetattrIn,
-    ) -> Result<FuseAttrOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<SetattrIn>()) as u32,
-            FuseOpcode::Setattr.into(),
-            unique,
-            nodeid,
-        );
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, setattr_in, size_of::<FuseAttrOut>())?;
+struct SetattrOperation {
+    nodeid: u64,
+    setattr_in: SetattrIn,
+}
 
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        request.read_payload(0)
+impl FuseOperation for SetattrOperation {
+    type Output = FuseAttrOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Setattr as u32,
+            self.nodeid,
+            &[self.setattr_in.as_bytes()],
+            Some(size_of::<FuseAttrOut>()),
+        )
     }
 
-    pub fn fuse_opendir(&self, nodeid: u64) -> Result<u64, VirtioDeviceError> {
-        let unique = self.alloc_unique();
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
-            FuseOpcode::Opendir.into(),
-            unique,
-            nodeid,
-        );
-        let open_in = OpenIn::new(0);
+struct OpendirOperation {
+    nodeid: u64,
+    open_in: OpenIn,
+}
 
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>())?;
+impl FuseOperation for OpendirOperation {
+    type Output = u64;
 
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let open_out: OpenOut = request.read_payload(0)?;
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Opendir as u32,
+            self.nodeid,
+            &[self.open_in.as_bytes()],
+            Some(size_of::<OpenOut>()),
+        )
+    }
 
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let open_out: OpenOut = read_reply_payload(request, out_header)?;
         Ok(open_out.fh)
     }
+}
 
-    pub fn fuse_readdir(
-        &self,
-        nodeid: u64,
-        fh: u64,
-        offset: u64,
-        size: u32,
-    ) -> Result<Vec<VirtioFsDirEntry>, VirtioDeviceError> {
-        let unique = self.alloc_unique();
+struct ReaddirOperation {
+    nodeid: u64,
+    read_in: ReadIn,
+    size: usize,
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<ReadIn>()) as u32,
-            FuseOpcode::Readdir.into(),
-            unique,
-            nodeid,
-        );
-        let read_in = ReadIn::new(fh, offset, size);
+impl FuseOperation for ReaddirOperation {
+    type Output = Vec<VirtioFsDirEntry>;
 
-        let out_payload_size = size as usize;
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, read_in, out_payload_size)?;
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Readdir as u32,
+            self.nodeid,
+            &[self.read_in.as_bytes()],
+            Some(self.size),
+        )
+    }
 
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-
-        let out_header = request.check_reply(unique)?;
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
         let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
-        let payload_len = cmp::min(payload_len, out_payload_size);
-
+        let payload_len = cmp::min(payload_len, self.size);
         let mut payload = vec![0u8; payload_len];
         request.read_payload_bytes(0, payload.as_mut_slice())?;
 
         let mut entries = Vec::new();
         let mut pos = 0usize;
-
         while pos + size_of::<Dirent>() <= payload_len {
             let header = Dirent::from_bytes(&payload[pos..pos + size_of::<Dirent>()]);
             if header.namelen == 0 {
@@ -376,74 +339,376 @@ impl FileSystemDevice {
             }
 
             let dirent_len = size_of::<Dirent>() + header.namelen as usize;
-            let aligned = (dirent_len + 7) & !7;
-            pos += aligned;
+            pos += (dirent_len + 7) & !7;
         }
 
         Ok(entries)
     }
+}
 
-    pub fn fuse_releasedir(&self, nodeid: u64, fh: u64) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
+struct ReleasedirOperation {
+    nodeid: u64,
+    release_in: ReleaseIn,
+}
 
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
-            FuseOpcode::Releasedir.into(),
-            unique,
-            nodeid,
+impl FuseOperation for ReleasedirOperation {
+    type Output = ();
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Releasedir as u32,
+            self.nodeid,
+            &[self.release_in.as_bytes()],
+            Some(0),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        _request: &FuseRequest,
+        _out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        Ok(())
+    }
+}
+
+struct ReadlinkOperation {
+    nodeid: u64,
+}
+
+impl FuseOperation for ReadlinkOperation {
+    type Output = String;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(FuseOpcode::Readlink as u32, self.nodeid, &[], Some(4096))
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+        let mut payload = vec![0u8; payload_len];
+        request.read_payload_bytes(0, payload.as_mut_slice())?;
+
+        let end = payload
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(payload_len);
+        Ok(String::from_utf8_lossy(&payload[..end]).to_string())
+    }
+}
+
+struct LinkOperation<'a> {
+    link_in: LinkIn,
+    new_parent_nodeid: u64,
+    new_name: &'a str,
+}
+
+impl FuseOperation for LinkOperation<'_> {
+    type Output = EntryOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Link as u32,
+            self.new_parent_nodeid,
+            &[self.link_in.as_bytes(), self.new_name.as_bytes(), &[0]],
+            Some(size_of::<EntryOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
+
+struct OpenOperation {
+    nodeid: u64,
+    open_in: OpenIn,
+}
+
+impl FuseOperation for OpenOperation {
+    type Output = OpenOut;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Open as u32,
+            self.nodeid,
+            &[self.open_in.as_bytes()],
+            Some(size_of::<OpenOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        read_reply_payload(request, out_header)
+    }
+}
+
+struct ReleaseOperation {
+    nodeid: u64,
+    release_in: ReleaseIn,
+}
+
+impl FuseOperation for ReleaseOperation {
+    type Output = ();
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Release as u32,
+            self.nodeid,
+            &[self.release_in.as_bytes()],
+            Some(0),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        _request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let _ = out_header;
+        Ok(())
+    }
+}
+
+struct LseekOperation {
+    nodeid: u64,
+    lseek_in: LseekIn,
+}
+
+impl FuseOperation for LseekOperation {
+    type Output = i64;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Lseek as u32,
+            self.nodeid,
+            &[self.lseek_in.as_bytes()],
+            Some(size_of::<LseekOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let lseek_out: LseekOut = read_reply_payload(request, out_header)?;
+        Ok(lseek_out.offset)
+    }
+}
+
+struct ReadOperation {
+    nodeid: u64,
+    read_in: ReadIn,
+    size: usize,
+}
+
+impl FuseOperation for ReadOperation {
+    type Output = Vec<u8>;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Read as u32,
+            self.nodeid,
+            &[self.read_in.as_bytes()],
+            Some(self.size),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+        let payload_len = cmp::min(payload_len, self.size);
+        let mut content = vec![0u8; payload_len];
+        request.read_payload_bytes(0, content.as_mut_slice())?;
+        Ok(content)
+    }
+}
+
+struct WriteOperation<'a> {
+    nodeid: u64,
+    write_in: WriteIn,
+    data: &'a [u8],
+}
+
+impl FuseOperation for WriteOperation<'_> {
+    type Output = usize;
+
+    fn build_request(&self, fs: &FileSystemDevice) -> Result<FuseRequest, VirtioDeviceError> {
+        fs.prepare_fuse_request(
+            FuseOpcode::Write as u32,
+            self.nodeid,
+            &[self.write_in.as_bytes(), self.data],
+            Some(size_of::<WriteOut>()),
+        )
+    }
+
+    fn decode_reply(
+        self,
+        request: &FuseRequest,
+        out_header: OutHeader,
+    ) -> Result<Self::Output, VirtioDeviceError> {
+        let write_out: WriteOut = read_reply_payload(request, out_header)?;
+        Ok(write_out.size as usize)
+    }
+}
+
+impl FileSystemDevice {
+    pub(crate) fn fuse_init(&self) -> Result<(), VirtioDeviceError> {
+        let operation = InitOperation {
+            init_in: InitIn::new(FUSE_KERNEL_VERSION, FUSE_KERNEL_MINOR_VERSION, 0, 0, 0),
+        };
+        let request = operation.build_request(self)?;
+        let request = alloc::sync::Arc::new(request);
+        self.submit_to_queue(&self.request_queues[0], request.clone())?;
+        loop {
+            self.handle_queue_irq(&self.request_queues[0]);
+
+            if request.wait_state.lock().completed {
+                break;
+            }
+
+            core::hint::spin_loop();
+        }
+        let init_out = operation.decode_reply(&request, request.check_reply()?)?;
+
+        info!(
+            "{} FUSE session started: protocol {}.{} -> {}.{}, max_write={}, flags=0x{:x}",
+            DEVICE_NAME,
+            FUSE_KERNEL_VERSION,
+            FUSE_KERNEL_MINOR_VERSION,
+            init_out.major,
+            init_out.minor,
+            init_out.max_write,
+            init_out.flags,
         );
-        let release_in = ReleaseIn::new(fh, 0);
-
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_payload_slice = self.prepare_in_payload_buf(release_in)?;
-        let out_header_slice = self.prepare_out_header_buf()?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice],
-        )?;
-        request.check_reply(unique)?;
 
         Ok(())
     }
 
-    pub fn fuse_readlink(&self, nodeid: u64) -> Result<String, VirtioDeviceError> {
-        const MAX_READLINK_SIZE: usize = 4096;
-        let unique = self.alloc_unique();
+    pub fn fuse_lookup(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        self.execute(LookupOperation {
+            parent_nodeid,
+            name,
+        })
+    }
 
-        let in_header = InHeader::new(
-            size_of::<InHeader>() as u32,
-            FuseOpcode::Readlink.into(),
-            unique,
+    pub fn fuse_mkdir(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+        mode: u32,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        self.execute(MkdirOperation {
+            parent_nodeid,
+            mkdir_in: MkdirIn::new(mode),
+            name,
+        })
+    }
+
+    pub fn fuse_mknod(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+        mode: u32,
+        rdev: u32,
+    ) -> Result<EntryOut, VirtioDeviceError> {
+        self.execute(MknodOperation {
+            parent_nodeid,
+            mknod_in: MknodIn::new(mode, rdev),
+            name,
+        })
+    }
+
+    pub fn fuse_unlink(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
+        self.execute(UnlinkOperation {
+            parent_nodeid,
+            name,
+        })
+    }
+
+    pub fn fuse_rmdir(&self, parent_nodeid: u64, name: &str) -> Result<(), VirtioDeviceError> {
+        self.execute(RmdirOperation {
+            parent_nodeid,
+            name,
+        })
+    }
+
+    pub fn fuse_create(
+        &self,
+        parent_nodeid: u64,
+        name: &str,
+        mode: u32,
+    ) -> Result<(EntryOut, OpenOut), VirtioDeviceError> {
+        self.execute(CreateOperation {
+            parent_nodeid,
+            create_in: CreateIn::new(O_RDWR, mode),
+            name,
+        })
+    }
+
+    pub fn fuse_getattr(&self, nodeid: u64) -> Result<FuseAttrOut, VirtioDeviceError> {
+        self.execute(GetattrOperation {
             nodeid,
-        );
+            getattr_in: GetattrIn::new(0),
+        })
+    }
 
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let out_header_slice = self.prepare_out_header_buf()?;
-        let out_payload_slice = self.prepare_out_payload_buf(MAX_READLINK_SIZE)?;
+    pub fn fuse_setattr(
+        &self,
+        nodeid: u64,
+        setattr_in: SetattrIn,
+    ) -> Result<FuseAttrOut, VirtioDeviceError> {
+        self.execute(SetattrOperation { nodeid, setattr_in })
+    }
 
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
+    pub fn fuse_opendir(&self, nodeid: u64) -> Result<u64, VirtioDeviceError> {
+        self.execute(OpendirOperation {
+            nodeid,
+            open_in: OpenIn::new(0),
+        })
+    }
 
-        let out_header = request.check_reply(unique)?;
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
+    pub fn fuse_readdir(
+        &self,
+        nodeid: u64,
+        fh: u64,
+        offset: u64,
+        size: u32,
+    ) -> Result<Vec<VirtioFsDirEntry>, VirtioDeviceError> {
+        self.execute(ReaddirOperation {
+            nodeid,
+            read_in: ReadIn::new(fh, offset, size),
+            size: size as usize,
+        })
+    }
 
-        let mut payload = vec![0u8; payload_len];
-        request.read_payload_bytes(0, payload.as_mut_slice())?;
+    pub fn fuse_releasedir(&self, nodeid: u64, fh: u64) -> Result<(), VirtioDeviceError> {
+        self.execute(ReleasedirOperation {
+            nodeid,
+            release_in: ReleaseIn::new(fh, 0),
+        })
+    }
 
-        // Fuse readlink may include a trailing '\0'.
-        let end = payload.iter().position(|b| *b == 0).unwrap_or(payload_len);
-        let target = String::from_utf8_lossy(&payload[..end]).to_string();
-
-        Ok(target)
+    pub fn fuse_readlink(&self, nodeid: u64) -> Result<String, VirtioDeviceError> {
+        self.execute(ReadlinkOperation { nodeid })
     }
 
     pub fn fuse_link(
@@ -452,83 +717,25 @@ impl FileSystemDevice {
         new_parent_nodeid: u64,
         new_name: &str,
     ) -> Result<EntryOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<LinkIn>() + new_name.len() + 1) as u32,
-            FuseOpcode::Link.into(),
-            unique,
+        self.execute(LinkOperation {
+            link_in: LinkIn::new(old_nodeid),
             new_parent_nodeid,
-        );
-        let link_in = LinkIn::new(old_nodeid);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, link_in, size_of::<EntryOut>())?;
-        let in_name_slice = self.prepare_in_name_buf(new_name)?;
-
-        let selector = self.select_request_queue(new_parent_nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice, in_name_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        request.read_payload(0)
+            new_name,
+        })
     }
 
     pub fn fuse_open(&self, nodeid: u64, flags: u32) -> Result<OpenOut, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<OpenIn>()) as u32,
-            FuseOpcode::Open.into(),
-            unique,
+        self.execute(OpenOperation {
             nodeid,
-        );
-        let open_in = OpenIn::new(flags);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, open_in, size_of::<OpenOut>())?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let open_out: OpenOut = request.read_payload(0)?;
-
-        Ok(open_out)
+            open_in: OpenIn::new(flags),
+        })
     }
 
     pub fn fuse_release(&self, nodeid: u64, fh: u64, flags: u32) -> Result<(), VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<ReleaseIn>()) as u32,
-            FuseOpcode::Release.into(),
-            unique,
+        self.execute(ReleaseOperation {
             nodeid,
-        );
-        let release_in = ReleaseIn::new(fh, flags);
-
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_payload_slice = self.prepare_in_payload_buf(release_in)?;
-        let out_header_slice = self.prepare_out_header_buf()?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice],
-        )?;
-        request.check_reply(unique)?;
-
-        Ok(())
+            release_in: ReleaseIn::new(fh, flags),
+        })
     }
 
     pub fn fuse_lseek(
@@ -538,30 +745,10 @@ impl FileSystemDevice {
         offset: i64,
         whence: u32,
     ) -> Result<i64, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<LseekIn>()) as u32,
-            FuseOpcode::Lseek.into(),
-            unique,
+        self.execute(LseekOperation {
             nodeid,
-        );
-        let lseek_in = LseekIn::new(fh, offset, whence);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, lseek_in, size_of::<LseekOut>())?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let lseek_out: LseekOut = request.read_payload(0)?;
-
-        Ok(lseek_out.offset)
+            lseek_in: LseekIn::new(fh, offset, whence),
+        })
     }
 
     pub fn fuse_read(
@@ -571,37 +758,11 @@ impl FileSystemDevice {
         offset: u64,
         size: u32,
     ) -> Result<Vec<u8>, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<ReadIn>()) as u32,
-            FuseOpcode::Read.into(),
-            unique,
+        self.execute(ReadOperation {
             nodeid,
-        );
-        let read_in = ReadIn::new(fh, offset, size);
-
-        let out_payload_size = size as usize;
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, read_in, out_payload_size)?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-
-        let out_header = request.check_reply(unique)?;
-
-        let payload_len = (out_header.len as usize).saturating_sub(size_of::<OutHeader>());
-        let payload_len = cmp::min(payload_len, out_payload_size);
-
-        let mut content = vec![0u8; payload_len];
-        request.read_payload_bytes(0, content.as_mut_slice())?;
-
-        Ok(content)
+            read_in: ReadIn::new(fh, offset, size),
+            size: size as usize,
+        })
     }
 
     pub fn fuse_write(
@@ -611,60 +772,24 @@ impl FileSystemDevice {
         offset: u64,
         data: &[u8],
     ) -> Result<usize, VirtioDeviceError> {
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<WriteIn>() + data.len()) as u32,
-            FuseOpcode::Write.into(),
-            unique,
+        self.execute(WriteOperation {
             nodeid,
-        );
-        let write_in = WriteIn::new(fh, offset, data.len() as u32);
-
-        let (in_header_slice, in_payload_slice, out_header_slice, out_payload_slice) =
-            self.prepare_request_slices(in_header, write_in, size_of::<WriteOut>())?;
-
-        let in_data_slice = self.prepare_in_data_buf(data)?;
-
-        let selector = self.select_request_queue(nodeid);
-        let request = self.submit_request_and_wait(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice, in_data_slice],
-            vec![out_header_slice, out_payload_slice],
-        )?;
-        request.check_reply(unique)?;
-        let write_out: WriteOut = request.read_payload(0)?;
-
-        Ok(write_out.size as usize)
+            write_in: WriteIn::new(fh, offset, data.len() as u32),
+            data,
+        })
     }
 
     pub fn fuse_forget(&self, nodeid: u64, nlookup: u64) -> Result<(), VirtioDeviceError> {
         if nodeid == FUSE_ROOT_ID || nlookup == 0 {
             return Ok(());
         }
-
-        let unique = self.alloc_unique();
-
-        let in_header = InHeader::new(
-            (size_of::<InHeader>() + size_of::<ForgetIn>()) as u32,
-            FuseOpcode::Forget.into(),
-            unique,
+        let request = self.prepare_fuse_request(
+            FuseOpcode::Forget as u32,
             nodeid,
-        );
-        let forget_in = ForgetIn::new(nlookup);
-
-        let in_header_slice = self.prepare_in_header_buf(in_header)?;
-        let in_payload_slice = self.prepare_in_payload_buf(forget_in)?;
-
-        let selector = QueueSelector::Hiprio;
-        let _ = self.submit_request(
-            selector,
-            unique,
-            vec![in_header_slice, in_payload_slice],
-            vec![],
+            &[ForgetIn::new(nlookup).as_bytes()],
+            None,
         )?;
-
+        let _ = self.submit_to_queue(&self.hiprio_queue, alloc::sync::Arc::new(request))?;
         Ok(())
     }
 }
