@@ -29,6 +29,10 @@ COVERAGE ?= 0
 # Note that currently the virtual terminal (tty0) can only work with
 # linux-efi-handover64 and linux-efi-pe64 boot protocol.
 CONSOLE ?= hvc0
+VIRTIOFS_TAG ?= kataShared
+VIRTIOFS_SHARED_DIR ?= /tmp/shared_dir
+# Whether to attach a virtio-fs device to QEMU.
+ENABLE_VIRTIOFS ?= 0
 # End of global build options.
 
 # GDB debugging and profiling options.
