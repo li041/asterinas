@@ -160,10 +160,10 @@ impl VirtQueue {
     /// Add dma buffers to the virtqueue, return a token.
     ///
     /// Ref: linux virtio_ring.c virtqueue_add
-    pub fn add_dma_buf<T: DmaBuf>(
+    pub fn add_dma_buf<I: DmaBuf, O: DmaBuf>(
         &mut self,
-        inputs: &[&T],
-        outputs: &[&T],
+        inputs: &[&I],
+        outputs: &[&O],
     ) -> Result<u16, QueueError> {
         if inputs.is_empty() && outputs.is_empty() {
             return Err(QueueError::InvalidArgs);
@@ -227,6 +227,16 @@ impl VirtQueue {
 
         fence(Ordering::SeqCst);
         Ok(head)
+    }
+
+    /// Adds only input DMA buffers to the virtqueue and returns a token.
+    pub fn add_input_buf<I: DmaBuf>(&mut self, inputs: &[&I]) -> Result<u16, QueueError> {
+        self.add_dma_buf(inputs, &[] as &[&I])
+    }
+
+    /// Adds only output DMA buffers to the virtqueue and returns a token.
+    pub fn add_output_buf<O: DmaBuf>(&mut self, outputs: &[&O]) -> Result<u16, QueueError> {
+        self.add_dma_buf(&[] as &[&O], outputs)
     }
 
     /// Whether there is a used element that can pop.
