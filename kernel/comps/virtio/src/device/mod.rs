@@ -2,7 +2,7 @@
 
 use int_to_c_enum::TryFromInt;
 
-use crate::queue::QueueError;
+use crate::{queue::QueueError, transport::VirtioTransportError};
 
 pub mod block;
 pub mod console;
@@ -46,6 +46,8 @@ pub enum VirtioDeviceError {
     QueuesAmountDoNotMatch(u16, u16),
     /// unknown error of queue
     QueueUnknownError,
+    /// unknown error of transport
+    TransportUnknownError,
     /// The input virtio capability list contains invalid element
     CapabilityListError,
 }
@@ -53,5 +55,11 @@ pub enum VirtioDeviceError {
 impl From<QueueError> for VirtioDeviceError {
     fn from(_: QueueError) -> Self {
         VirtioDeviceError::QueueUnknownError
+    }
+}
+
+impl From<VirtioTransportError> for VirtioDeviceError {
+    fn from(_: VirtioTransportError) -> Self {
+        VirtioDeviceError::TransportUnknownError
     }
 }

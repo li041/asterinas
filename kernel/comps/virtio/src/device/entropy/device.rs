@@ -3,138 +3,166 @@
 use alloc::{boxed::Box, format, sync::Arc};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use aster_network::dma_pool::{DmaPool, DmaSegment};
-use aster_util::slot_vec::SlotVec;
-use log::debug;
 use ostd::{
+    Error,
     arch::trap::TrapFrame,
-    mm::{PAGE_SIZE, dma::FromDevice},
-    sync::SpinLock,
+    mm::{
+        Fallible, FallibleVmRead, FrameAllocOptions, HasSize, PAGE_SIZE, VmWriter,
+        dma::{DmaStream, FromDevice},
+        io::util::HasVmReaderWriter,
+    },
+    sync::{SpinLock, WaitQueue},
 };
 
 use crate::{
-    device::{
-        VirtioDeviceError,
-        entropy::{handle_recv_irq, register_device},
-    },
+    device::{VirtioDeviceError, entropy::register_device},
     queue::VirtQueue,
     transport::VirtioTransport,
 };
 
-pub static ENTROPY_DEVICE_PREFIX: &str = "virtio_rng.";
+pub const ENTROPY_DEVICE_PREFIX: &str = "virtio_rng.";
 static ENTROPY_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 
-const POOL_INIT_SIZE: usize = 0;
-const POOL_HIGH_WATERMARK: usize = 64;
-const ENTROPY_QUEUE_SIZE: u16 = 64;
+const ENTROPY_QUEUE_SIZE: u16 = 1;
 const ENTROPY_BUFFER_SIZE: usize = PAGE_SIZE;
 
 /// Entropy devices, which supply high-quality randomness for guest use.
 pub struct EntropyDevice {
     transport: SpinLock<Box<dyn VirtioTransport>>,
-    request_queue: SpinLock<EntropyRequestQueue>,
+    inner: SpinLock<EntropyDeviceInner>,
+    wait_queue: WaitQueue,
 }
 
 impl EntropyDevice {
     pub(crate) fn init(mut transport: Box<dyn VirtioTransport>) -> Result<(), VirtioDeviceError> {
-        let receive_buffer_pool = DmaPool::new(
-            ENTROPY_BUFFER_SIZE,
-            POOL_INIT_SIZE,
-            POOL_HIGH_WATERMARK,
-            false,
-        );
-        let request_queue = SpinLock::new(EntropyRequestQueue::new(
-            VirtQueue::new(0, ENTROPY_QUEUE_SIZE, transport.as_mut()).unwrap(),
-            receive_buffer_pool,
-        ));
-
-        let mut device = EntropyDevice {
+        let inner = SpinLock::new(EntropyDeviceInner::new(VirtQueue::new(
+            0,
+            ENTROPY_QUEUE_SIZE,
+            transport.as_mut(),
+        )?));
+        let device = Arc::new(EntropyDevice {
             transport: SpinLock::new(transport),
-            request_queue,
-        };
+            inner,
+            wait_queue: WaitQueue::new(),
+        });
 
         // Register IRQ callbacks.
-        let transport = device.transport.get_mut();
-        transport
-            .register_queue_callback(0, Box::new(handle_recv_irq), false)
-            .unwrap();
-        transport
-            .register_cfg_callback(Box::new(config_space_change))
-            .unwrap();
+        let mut transport = device.transport.lock();
+        transport.register_queue_callback(
+            0,
+            Box::new({
+                let device = device.clone();
+                move |_: &TrapFrame| device.handle_recv_irq()
+            }),
+            false,
+        )?;
+        // Virtio-rng has no configuration fields, so config-space change interrupts
+        // are not expected and no config callback is registered.
         transport.finish_init();
+        drop(transport);
 
         let device_id = ENTROPY_DEVICE_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!("{ENTROPY_DEVICE_PREFIX}{device_id}");
 
-        register_device(name, Arc::new(device));
+        register_device(name, device);
 
         Ok(())
     }
 
-    /// Tries to read some random data from the device.
-    pub fn try_read(&self) -> Option<(DmaSegment<FromDevice>, usize)> {
-        let (receive_buffer, used_len) = {
-            let mut request_queue = self.request_queue.lock();
-            let (receive_buffer, used_len) = request_queue.pop_used()?;
+    /// Copies up to `writer.avail()` bytes into `writer`.
+    /// Returns `Ok(n)` with `n > 0` on success, `Ok(0)` iff `writer.avail() == 0`,
+    /// `Ok(None)` if no cached bytes are available (caller decides whether to block).
+    pub fn try_read_into(
+        &self,
+        writer: &mut VmWriter<'_, Fallible>,
+    ) -> core::result::Result<Option<usize>, Error> {
+        let mut inner = self.inner.lock();
 
-            (receive_buffer, used_len)
+        // 1) Drain any cached lefovers first - no vq interaction.
+        if inner.data_idx < inner.data_avail {
+            let available = inner.data_avail - inner.data_idx;
+            let read_len = available.min(writer.avail());
+
+            let copied = {
+                let mut reader = inner.buffer.reader()?;
+                reader
+                    .skip(inner.data_idx)
+                    .limit(read_len)
+                    .read_fallible(writer)
+                    .map_err(|(err, _)| err)?
+            };
+            inner.data_idx += copied;
+            return Ok(Some(copied));
+        }
+
+        // 2) Cache empty -> submit exactly one request, if we haven't already.
+        if !inner.in_flight {
+            let EntropyDeviceInner {
+                queue,
+                buffer,
+                in_flight,
+                ..
+            } = &mut *inner;
+
+            queue
+                .add_dma_buf(&[], &[buffer])
+                .map_err(|_| Error::IoError)?;
+            if queue.should_notify() {
+                queue.notify();
+            }
+            *in_flight = true;
+        }
+
+        Ok(None)
+    }
+
+    pub fn wait_queue(&self) -> &WaitQueue {
+        &self.wait_queue
+    }
+
+    fn handle_recv_irq(&self) {
+        let mut inner = self.inner.lock();
+
+        let Ok((_, used_len)) = inner.queue.pop_used() else {
+            return;
         };
 
-        receive_buffer.sync_from_device(0..used_len).unwrap();
+        let used_len = (used_len as usize).min(inner.buffer.size());
+        inner.buffer.sync_from_device(0..used_len).unwrap();
+        inner.data_avail = used_len;
+        inner.data_idx = 0;
+        inner.in_flight = false;
+        drop(inner);
 
-        Some((receive_buffer, used_len))
+        self.wait_queue.wake_all();
     }
 }
 
-struct EntropyRequestQueue {
+struct EntropyDeviceInner {
     queue: VirtQueue,
-    receive_buffer_pool: Arc<DmaPool<FromDevice>>,
-    receive_buffers: SlotVec<DmaSegment<FromDevice>>,
+    buffer: DmaStream<FromDevice>,
+    data_avail: usize,
+    data_idx: usize,
+    in_flight: bool,
 }
 
-impl EntropyRequestQueue {
-    fn new(queue: VirtQueue, receive_buffer_pool: Arc<DmaPool<FromDevice>>) -> Self {
-        let mut this = Self {
+impl EntropyDeviceInner {
+    fn new(queue: VirtQueue) -> Self {
+        let buffer = DmaStream::<FromDevice>::map(
+            FrameAllocOptions::new()
+                .alloc_segment(ENTROPY_BUFFER_SIZE / PAGE_SIZE)
+                .unwrap()
+                .into(),
+            false,
+        )
+        .unwrap();
+
+        Self {
             queue,
-            receive_buffer_pool,
-            receive_buffers: SlotVec::new(),
-        };
-
-        for _ in 0..ENTROPY_QUEUE_SIZE {
-            let receive_buffer = this.receive_buffer_pool.alloc_segment().unwrap();
-            let token = this.queue.add_dma_buf(&[], &[&receive_buffer]).unwrap();
-            this.receive_buffers.put_at(token as usize, receive_buffer);
-        }
-        if this.queue.should_notify() {
-            this.queue.notify();
-        }
-
-        this
-    }
-
-    fn pop_used(&mut self) -> Option<(DmaSegment<FromDevice>, usize)> {
-        let Ok((token, used_len)) = self.queue.pop_used() else {
-            return None;
-        };
-
-        let receive_buffer = self.receive_buffers.remove(token as usize).unwrap();
-
-        let replenished_receive_buffer = self.receive_buffer_pool.alloc_segment().unwrap();
-        self.add_receive_buffer_and_notify(replenished_receive_buffer);
-
-        Some((receive_buffer, used_len as usize))
-    }
-
-    fn add_receive_buffer_and_notify(&mut self, receive_buffer: DmaSegment<FromDevice>) {
-        let token = self.queue.add_dma_buf(&[], &[&receive_buffer]).unwrap();
-        self.receive_buffers.put_at(token as usize, receive_buffer);
-
-        if self.queue.should_notify() {
-            self.queue.notify();
+            buffer,
+            data_avail: 0,
+            data_idx: 0,
+            in_flight: false,
         }
     }
-}
-
-fn config_space_change(_: &TrapFrame) {
-    debug!("Virtio-Entropy device configuration space change");
 }

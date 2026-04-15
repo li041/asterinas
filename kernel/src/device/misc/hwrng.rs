@@ -2,14 +2,9 @@
 
 use alloc::{boxed::Box, string::String, sync::Arc};
 
-use aster_virtio::device::entropy::{
-    all_devices, device::EntropyDevice, get_device, register_recv_callback,
-};
+use aster_virtio::device::entropy::{all_devices, device::EntropyDevice};
 use device_id::{DeviceId, MinorId};
-use ostd::{
-    mm::{FallibleVmRead, VmReader, VmWriter},
-    sync::WaitQueue,
-};
+use ostd::mm::{VmReader, VmWriter};
 
 use crate::{
     device::{Device, DeviceType, registry::char},
@@ -24,17 +19,11 @@ use crate::{
 
 const HWRNG_MINOR: u32 = 183;
 
-/// A `WaitQueue` for data notification from hardware RNG devices.
-//
-// TODO: Ideally, each device should have its own `WaitQueue`. However, this queue is shared by all
-// hardware RNG devices. This applies even if the device is not currently in use.
-static RNG_WAIT_QUEUE: WaitQueue = WaitQueue::new();
-
-/// The name of the currently in-use hardware RNG device.
+/// The currently in-use hardware RNG device.
 //
 // TODO: Users can select a device by writing its name to `/sys/class/misc/hw_random/rng_current`,
 // which is not supported yet.
-static RNG_CURRENT_NAME: Mutex<Option<String>> = Mutex::new(None);
+static RNG_CURRENT: Mutex<Option<Arc<EntropyDevice>>> = Mutex::new(None);
 
 /// The `/dev/hwrng` device.
 struct HwRngDevice {
@@ -72,40 +61,12 @@ impl Device for HwRngDevice {
 /// A file handle opened from `/dev/hwrng`.
 struct RngCurrent;
 
-impl RngCurrent {
-    fn current_device() -> Result<Arc<EntropyDevice>> {
-        let Some(name) = RNG_CURRENT_NAME.lock().clone() else {
-            return_errno_with_message!(Errno::ENODEV, "no current hardware RNG device is selected");
-        };
-
-        let Some(rng) = get_device(&name) else {
-            return_errno_with_message!(
-                Errno::ENODEV,
-                "the current hardware RNG device is unavailable"
-            );
-        };
-
-        Ok(rng)
-    }
-
-    fn try_read(&self, writer: &mut VmWriter) -> Result<usize> {
-        let rng = Self::current_device()?;
-        let Some((read_buffer, read_buffer_len)) = rng.try_read() else {
-            return_errno_with_message!(Errno::EAGAIN, "no random data is available");
-        };
-
-        // If `read_buffer` has more bytes than the writer, we'll drop the trailing bytes. This
-        // should be fine, since we're just dropping random data.
-        read_buffer
-            .reader()
-            .unwrap()
-            .limit(read_buffer_len)
-            .read_fallible(writer)
-            .map_err(|(err, _copied)| Error::from(err))
-    }
-}
-
 impl Pollable for RngCurrent {
+    // Linux's `/dev/hwrng` does not implement `.poll`, so userspace sees the VFS
+    // default ("always ready"). We mirror that contract here: `poll` reports
+    // `IN | OUT` unconditionally and does not register `poller`, so `epoll`
+    // clients should not rely on edge-triggered wake-ups from this device.
+    // See `drivers/char/hw_random/core.c` (`rng_chrdev_ops`) upstream.
     fn poll(&self, mask: IoEvents, _poller: Option<&mut PollHandle>) -> IoEvents {
         mask & (IoEvents::IN | IoEvents::OUT)
     }
@@ -118,6 +79,7 @@ impl InodeIo for RngCurrent {
         writer: &mut VmWriter,
         status_flags: StatusFlags,
     ) -> Result<usize> {
+        let dev = current_device()?;
         let len = writer.avail();
         let mut written_bytes = 0;
         let is_nonblocking = status_flags.contains(StatusFlags::O_NONBLOCK);
@@ -127,15 +89,15 @@ impl InodeIo for RngCurrent {
             let mut new_writer = writer.clone_exclusive();
 
             let read_res = if is_nonblocking {
-                self.try_read(&mut new_writer)
+                try_read_entropy(dev.as_ref(), &mut new_writer)
             } else {
-                RNG_WAIT_QUEUE
-                    .pause_until(|| match self.try_read(&mut new_writer) {
+                dev.wait_queue().wait_until(|| {
+                    match try_read_entropy(dev.as_ref(), &mut new_writer) {
                         Ok(copied) => Some(Ok(copied)),
                         Err(err) if err.error() == Errno::EAGAIN => None,
                         Err(err) => Some(Err(err)),
-                    })
-                    .flatten()
+                    }
+                })
             };
 
             match read_res {
@@ -178,13 +140,24 @@ impl FileIo for RngCurrent {
 }
 
 pub(super) fn init_in_first_kthread() {
-    if let Some((name, _)) = all_devices().into_iter().next() {
-        *RNG_CURRENT_NAME.lock() = Some(name);
+    if let Some((_, device)) = all_devices().into_iter().next() {
+        *RNG_CURRENT.lock() = Some(device);
     }
 
-    register_recv_callback(|| {
-        RNG_WAIT_QUEUE.wake_all();
-    });
-
     char::register(HwRngDevice::new()).unwrap();
+}
+
+fn current_device() -> Result<Arc<EntropyDevice>> {
+    let Some(rng) = RNG_CURRENT.lock().clone() else {
+        return_errno_with_message!(Errno::ENODEV, "no current hardware RNG device is selected");
+    };
+    Ok(rng)
+}
+
+fn try_read_entropy(rng: &EntropyDevice, writer: &mut VmWriter) -> Result<usize> {
+    let Some(copied) = rng.try_read_into(writer)? else {
+        return_errno_with_message!(Errno::EAGAIN, "no random data is available");
+    };
+
+    Ok(copied)
 }
