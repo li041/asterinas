@@ -17,9 +17,12 @@ pub fn register_device(name: String, device: Arc<EntropyDevice>) {
         .insert(name, device);
 }
 
-pub fn get_device(str: &str) -> Option<Arc<EntropyDevice>> {
-    let lock = ENTROPY_DEVICE_TABLE.get().unwrap().lock();
-    lock.get(str).cloned()
+pub fn get_device(name: &str) -> Option<Arc<EntropyDevice>> {
+    let lock = ENTROPY_DEVICE_TABLE
+        .get()
+        .expect("entropy::init() must run before get_device()")
+        .lock();
+    lock.get(name).cloned()
 }
 
 pub fn all_devices() -> Vec<(String, Arc<EntropyDevice>)> {

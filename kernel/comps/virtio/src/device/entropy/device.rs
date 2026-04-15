@@ -48,6 +48,9 @@ impl EntropyDevice {
 
         // Register IRQ callbacks.
         let mut transport = device.transport.lock();
+
+        // Virtio-rng has no configuration fields, so config-space change interrupts
+        // are not expected and no config callback is registered.
         transport.register_queue_callback(
             0,
             Box::new({
@@ -56,8 +59,7 @@ impl EntropyDevice {
             }),
             false,
         )?;
-        // Virtio-rng has no configuration fields, so config-space change interrupts
-        // are not expected and no config callback is registered.
+
         transport.finish_init();
         drop(transport);
 
