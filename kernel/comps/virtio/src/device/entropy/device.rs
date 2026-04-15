@@ -20,7 +20,7 @@ use crate::{
     transport::VirtioTransport,
 };
 
-pub const ENTROPY_DEVICE_PREFIX: &str = "virtio_rng.";
+const ENTROPY_DEVICE_PREFIX: &str = "virtio_rng.";
 static ENTROPY_DEVICE_ID: AtomicUsize = AtomicUsize::new(0);
 
 const ENTROPY_QUEUE_SIZE: u16 = 1;
