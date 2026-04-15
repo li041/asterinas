@@ -1,10 +1,27 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Exposes the kernel hardware RNG as `/dev/hwrng`.
+//!
+//! This module is the misc-device consumer of the virtio entropy registry in
+//! `aster_virtio`. During initialization it picks the first registered
+//! [`EntropyDevice`] as the current RNG source and serves all `/dev/hwrng` reads
+//! from that shared device.
+//!
+//! Blocking reads wait on the current device's [`WaitQueue`], so all file
+//! handles observe the same readiness state and consume bytes from the same
+//! backing entropy stream. The current implementation stores only the selected
+//! device handle; if the Linux-compatible `rng_current` sysfs selector is added
+//! later, the selected device name will need to become explicit kernel state as
+//! well.
+
 use alloc::{boxed::Box, string::String, sync::Arc};
 
 use aster_virtio::device::entropy::{all_devices, device::EntropyDevice};
 use device_id::{DeviceId, MinorId};
-use ostd::mm::{VmReader, VmWriter};
+use ostd::{
+    mm::{VmReader, VmWriter},
+    sync::WaitQueue,
+};
 
 use crate::{
     device::{Device, DeviceType, registry::char},

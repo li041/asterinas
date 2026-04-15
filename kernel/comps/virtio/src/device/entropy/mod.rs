@@ -1,5 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Manages virtio entropy devices.
+//!
+//! This module owns the global registry of discovered [`EntropyDevice`] instances.
+//! Virtio transport initialization creates devices in [`device`], then registers
+//! them here under stable names such as `virtio_rng.0`. Callers can look up one
+//! device by name with `get_device` or snapshot the current registry with
+//! `all_devices`.
+//!
+//! The kernel crate consumes this registry from `/dev/hwrng`: its misc-device
+//! frontend selects one registered device as the current hardware RNG and blocks
+//! on that device's wait queue until fresh entropy arrives.
+
 use alloc::{collections::btree_map::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use ostd::sync::SpinLock;
