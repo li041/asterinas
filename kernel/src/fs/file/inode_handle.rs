@@ -123,6 +123,10 @@ impl InodeHandle {
             return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
         }
 
+        if let Some(ref file_io) = self.file_io {
+            return file_io.readdir(&self.offset, visitor);
+        }
+
         let mut offset = self.offset.lock();
         let read_cnt = self.path.inode().readdir_at(*offset, visitor)?;
         *offset += read_cnt;
@@ -407,9 +411,7 @@ impl FileLike for InodeHandle {
         if let Some(ref file_io) = self.file_io {
             file_io.check_seekable()?;
             if file_io.is_offset_aware() {
-                // TODO: Figure out whether we need to add support for seeking from the end of
-                // special files.
-                return do_seek_util(&self.offset, pos, None);
+                return file_io.seek(&self.offset, pos, self.path.inode().seek_end());
             } else {
                 return Ok(0);
             }
@@ -545,6 +547,18 @@ pub trait FileIo: Pollable + InodeIo + Any + Send + Sync + 'static {
     /// [`check_seekable`]: FileIo::check_seekable
     fn check_positional_io(&self) -> Result<()> {
         self.check_seekable()
+    }
+
+    /// Seeks the file position.
+    ///
+    /// `end` is the inode-provided end position used for [`SeekFrom::End`].
+    fn seek(&self, offset: &Mutex<usize>, pos: SeekFrom, end: Option<usize>) -> Result<usize> {
+        do_seek_util(offset, pos, end)
+    }
+
+    /// Reads directory entries and advances the offset.
+    fn readdir(&self, _offset: &Mutex<usize>, _visitor: &mut dyn DirentVisitor) -> Result<usize> {
+        return_errno_with_message!(Errno::ENOTDIR, "readdir is not supported");
     }
 
     // See `FileLike::mappable`.
