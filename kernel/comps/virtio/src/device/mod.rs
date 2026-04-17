@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use aster_fuse::FuseError;
 use int_to_c_enum::TryFromInt;
 
 use crate::{queue::QueueError, transport::VirtioTransportError};
 
 pub mod block;
 pub mod console;
+pub mod filesystem;
 pub mod input;
 pub mod network;
 pub mod socket;
@@ -36,6 +38,7 @@ pub(crate) enum VirtioDeviceType {
     Pstore = 22,
     Iommu = 23,
     Memory = 24,
+    FileSystem = 26,
 }
 
 #[derive(Debug)]
@@ -47,6 +50,10 @@ pub enum VirtioDeviceError {
     QueueUnknownError,
     /// unknown error of transport
     TransportUnknownError,
+    /// Request IDs have been exhausted
+    RequestIdExhausted,
+    /// filesystem request failed with a FUSE negative errno value
+    FileSystemError(i32),
     /// The input virtio capability list contains invalid element
     CapabilityListError,
     /// Failed to allocate resource during device initialization
@@ -56,6 +63,15 @@ pub enum VirtioDeviceError {
 impl From<QueueError> for VirtioDeviceError {
     fn from(_: QueueError) -> Self {
         VirtioDeviceError::QueueUnknownError
+    }
+}
+
+impl From<FuseError> for VirtioDeviceError {
+    fn from(error: FuseError) -> Self {
+        match error {
+            FuseError::RemoteError(errno) => Self::FileSystemError(errno),
+            _ => Self::QueueUnknownError,
+        }
     }
 }
 
