@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// A `Dentry` represents a cached filesystem node in the VFS tree.
-pub(in crate::fs) struct Dentry {
+pub struct Dentry {
     inode: Arc<dyn Inode>,
     type_: InodeType,
     name_and_parent: NameAndParent,
@@ -143,14 +143,14 @@ impl Dentry {
     /// Gets the name of the `Dentry`.
     ///
     /// Returns "/" if it is a root `Dentry`.
-    pub(super) fn name(&self) -> String {
+    pub(in crate::fs) fn name(&self) -> String {
         self.name_and_parent.name(self.inode.as_ref())
     }
 
     /// Gets the parent `Dentry`.
     ///
     /// Returns `None` if it is a root or pseudo `Dentry`.
-    pub(super) fn parent(&self) -> Option<Arc<Self>> {
+    pub(in crate::fs) fn parent(&self) -> Option<Arc<Self>> {
         self.name_and_parent.parent()
     }
 
@@ -164,7 +164,7 @@ impl Dentry {
     }
 
     /// Gets the inner inode.
-    pub(super) fn inode(&self) -> &Arc<dyn Inode> {
+    pub(in crate::fs) fn inode(&self) -> &Arc<dyn Inode> {
         &self.inode
     }
 
