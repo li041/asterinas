@@ -10,10 +10,22 @@
 // that can be found in the LICENSE file.
 //
 
-//! FUSE protocol definitions shared by in-kernel clients.
+//! Provides FUSE protocol definitions shared by in-kernel clients.
 //!
-//! This crate provides strongly-typed layouts for FUSE request/response headers,
-//! payloads, opcodes, and protocol constants.
+//! This crate contains the transport-independent on-wire pieces of the FUSE
+//! protocol: request and reply headers, payload layouts, opcodes, flags, and
+//! common constants.
+//!
+//! The main entry points are:
+//!
+//! - [`FuseOperation`], which describes one typed FUSE request/reply pair.
+//! - [`FuseError`] and [`FuseResult`], which report encoding and decoding
+//!   failures.
+//! - POD-compatible protocol structs such as [`InHeader`] and [`OutHeader`].
+//!
+//! The crate does not perform transport-specific request submission. Higher
+//! layers such as virtio-fs use these definitions to encode requests and decode
+//! replies.
 #![no_std]
 #![deny(unsafe_code)]
 
@@ -31,9 +43,11 @@ pub use self::{
     operation::FuseOperation,
 };
 
-/// An opaque FUSE file handle issued by the server on `FUSE_OPEN` /
-/// `FUSE_OPENDIR`. Every subsequent I/O and release request carries it so the
-/// backend can locate the corresponding open-file state.
+/// Represents an opaque FUSE file handle issued by the server.
+///
+/// The server returns this handle in `FUSE_OPEN` and `FUSE_OPENDIR` replies.
+/// Subsequent I/O and release requests carry it so the backend can locate the
+/// corresponding open-file state.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod)]
 pub struct FuseFileHandle(pub u64);
@@ -48,11 +62,12 @@ pub struct InHeader {
     pub uid: u32,
     pub gid: u32,
     pub pid: u32,
-    pub total_extlen: u16, // length of extensions in 8-byte units
+    pub total_extlen: u16,
     pub padding: u16,
 }
 
 impl InHeader {
+    /// Creates an [`InHeader`] with the provided core fields.
     pub const fn new(len: u32, opcode: u32, unique: u64, nodeid: u64) -> Self {
         Self {
             len,
@@ -77,10 +92,12 @@ pub struct OutHeader {
 }
 
 impl OutHeader {
+    /// Creates an [`OutHeader`] with the provided fields.
     pub const fn new(len: u32, error: i32, unique: u64) -> Self {
         Self { len, error, unique }
     }
 
+    /// Returns an empty [`OutHeader`].
     pub const fn empty() -> Self {
         Self::new(0, 0, 0)
     }
@@ -99,6 +116,7 @@ pub struct InitIn {
 }
 
 impl InitIn {
+    /// Creates a `FUSE_INIT` request payload.
     pub const fn new(
         major: u32,
         minor: u32,

@@ -10,7 +10,7 @@ use crate::{FuseOpcode, FuseResult};
 /// The trait uses closures for request-body writes and reply-payload reads
 /// instead of exposing a concrete buffer type. This keeps operation
 /// implementations focused on protocol encoding and decoding while leaving
-/// buffer deatils to the caller.
+/// buffer management to the caller.
 pub trait FuseOperation {
     type Output;
 
