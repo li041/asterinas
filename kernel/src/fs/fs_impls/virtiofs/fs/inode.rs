@@ -636,8 +636,7 @@ impl InodeIo for VirtioFsInode {
 
         let offset = if status_flags.contains(StatusFlags::O_APPEND) {
             self.revalidate_attr(fh)?;
-            let size = self.size();
-            size
+            self.size()
         } else {
             offset
         };
