@@ -214,6 +214,7 @@ NON_OSDK_CRATES := \
 	ostd/libs/ostd-pod/macros \
 	ostd/libs/ostd-test \
 	ostd/libs/padding-struct \
+	kernel/libs/aster-fuse \
 	kernel/libs/aster-rights \
 	kernel/libs/aster-rights-proc \
 	kernel/libs/atomic-integer-wrapper \
