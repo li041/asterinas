@@ -12,6 +12,9 @@
 #  - NETDEV: "user" or "tap";
 #  - VHOST: "off" or "on";
 #  - VSOCK: "off" or "on";
+#  - VIRTIOFS: "off" or "on";
+#  - VIRTIOFS_TAG: mount tag for virtio-fs device;
+#  - VIRTIOFS_SOCKET: vhost-user socket path for virtio-fs backend.
 #  - CONSOLE: "hvc0" to enable virtio console;
 #  - SMP: number of CPUs;
 #  - MEM: amount of memory, e.g. "8G";
@@ -20,8 +23,11 @@
 OVMF=${OVMF:-"on"}
 VHOST=${VHOST:-"off"}
 VSOCK=${VSOCK:-"off"}
+VIRTIOFS=${VIRTIOFS:-"off"}
 NETDEV=${NETDEV:-"user"}
 CONSOLE=${CONSOLE:-"hvc0"}
+VIRTIOFS_TAG=${VIRTIOFS_TAG:-"kataShared"}
+VIRTIOFS_SOCKET=${VIRTIOFS_SOCKET:-"/tmp/vhostqemu/vfs.sock"}
 
 SSH_RAND_PORT=${SSH_PORT:-$(shuf -i 1024-65535 -n 1)}
 NGINX_RAND_PORT=${NGINX_PORT:-$(shuf -i 1024-65535 -n 1)}
@@ -137,6 +143,18 @@ else
         -device virtio-serial-pci,disable-legacy=on,disable-modern=off$IOMMU_DEV_EXTRA \
         $CONSOLE_ARGS \
         $IOMMU_EXTRA_ARGS \
+    "
+fi
+
+
+if [ "$VIRTIOFS" = "on" ]; then
+    echo "[$1] Enabled virtio-fs: tag=$VIRTIOFS_TAG, socket=$VIRTIOFS_SOCKET" 1>&2
+    QEMU_ARGS="
+        $QEMU_ARGS \
+        -object memory-backend-memfd,id=mem0,size=${MEM:-8G},share=on \
+        -numa node,memdev=mem0 \
+        -chardev socket,id=char0,path=$VIRTIOFS_SOCKET \
+        -device vhost-user-fs-pci,chardev=char0,tag=$VIRTIOFS_TAG \
     "
 fi
 
