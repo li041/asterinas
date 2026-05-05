@@ -72,7 +72,7 @@ struct InodeInner {
 }
 
 #[derive(Clone, Copy)]
-enum MetadataChange {
+enum MetadataUpdate {
     Setattr(SetattrValid),
     Link,
 }
@@ -158,7 +158,7 @@ impl VirtioFsInode {
 
         let old_nodeid = self.nodeid();
         let fs = self.fs_ref();
-        let attr_version = fs.conn.current_attr_version();
+        let request_attr_version = fs.conn.current_attr_version();
         let entry_out = fs.conn.lookup(parent_nodeid, name)?;
 
         if entry_out.nodeid != old_nodeid {
@@ -171,11 +171,11 @@ impl VirtioFsInode {
         // Count only lookups that still point to this inode.
         self.lookup_count.increase();
 
-        self.update_metadata_if_fresh(
+        self.commit_fresh_metadata_reply(
             entry_out.attr,
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
-            attr_version,
+            request_attr_version,
             &fs,
         )?;
 
@@ -193,16 +193,16 @@ impl VirtioFsInode {
         }
 
         let fs = self.fs_ref();
-        let attr_version = fs.conn.current_attr_version();
+        let request_attr_version = fs.conn.current_attr_version();
         let attr_out = fs
             .conn
             .getattr(self.nodeid(), GetattrFlags::GETATTR_FH, fh)?;
 
-        self.update_metadata_if_fresh(
+        self.commit_fresh_metadata_reply(
             attr_out.attr,
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
-            attr_version,
+            request_attr_version,
             &fs,
         )?;
 
@@ -226,15 +226,15 @@ impl VirtioFsInode {
         Ok(())
     }
 
-    fn update_metadata_if_fresh(
+    fn commit_fresh_metadata_reply(
         &self,
         attr: Attr,
         attr_valid: u64,
         attr_valid_nsec: u32,
-        attr_version: AttrVersion,
+        request_attr_version: AttrVersion,
         fs: &VirtioFs,
     ) -> Result<()> {
-        if !self.inner.read().accepts_attr_version(attr_version) {
+        if !self.inner.read().accepts_attr_version(request_attr_version) {
             return Ok(());
         }
 
@@ -246,7 +246,7 @@ impl VirtioFsInode {
         // this inode to read the current size.
         let should_invalidate = {
             let mut inner = self.inner.write();
-            if !inner.accepts_attr_version(attr_version) {
+            if !inner.accepts_attr_version(request_attr_version) {
                 return Ok(());
             }
             self.commit_metadata_locked(
@@ -264,13 +264,13 @@ impl VirtioFsInode {
         Ok(())
     }
 
-    fn update_metadata_after_change(
+    fn commit_metadata_changing_reply(
         &self,
         attr: Attr,
         attr_valid: u64,
         attr_valid_nsec: u32,
-        attr_version: AttrVersion,
-        change: MetadataChange,
+        request_attr_version: AttrVersion,
+        update: MetadataUpdate,
         fs: &VirtioFs,
     ) -> Result<()> {
         let metadata = metadata_from_attr(attr, fs.sb().container_dev_id);
@@ -281,7 +281,7 @@ impl VirtioFsInode {
             // A successful metadata-changing request must be reflected locally.
             // If another update committed while the request was in flight, do
             // not refresh unrelated cached fields from this reply.
-            if inner.accepts_attr_version(attr_version) {
+            if inner.accepts_attr_version(request_attr_version) {
                 self.commit_metadata_locked(
                     &mut inner,
                     metadata,
@@ -289,7 +289,7 @@ impl VirtioFsInode {
                     fs,
                 )
             } else {
-                self.commit_metadata_change_locked(&mut inner, metadata, now, change, fs)
+                self.commit_metadata_update_locked(&mut inner, metadata, now, update, fs)
             }
         };
 
@@ -317,18 +317,18 @@ impl VirtioFsInode {
         should_invalidate
     }
 
-    fn commit_metadata_change_locked(
+    fn commit_metadata_update_locked(
         &self,
         inner: &mut InodeInner,
         metadata: Metadata,
         attr_valid_until: Duration,
-        change: MetadataChange,
+        update: MetadataUpdate,
         fs: &VirtioFs,
     ) -> bool {
         let old_metadata = inner.metadata;
 
-        match change {
-            MetadataChange::Setattr(valid) => {
+        match update {
+            MetadataUpdate::Setattr(valid) => {
                 if valid.contains(SetattrValid::FATTR_MODE) {
                     inner.metadata.type_ = metadata.type_;
                     inner.metadata.mode = metadata.mode;
@@ -363,7 +363,7 @@ impl VirtioFsInode {
                     inner.metadata.last_meta_change_at = metadata.last_meta_change_at;
                 }
             }
-            MetadataChange::Link => {
+            MetadataUpdate::Link => {
                 inner.metadata.nr_hard_links = metadata.nr_hard_links;
                 inner.metadata.last_meta_change_at = metadata.last_meta_change_at;
             }
@@ -644,16 +644,16 @@ impl VirtioFsInode {
 
     fn setattr(&self, setattr_in: SetattrIn) -> Result<()> {
         let fs = self.fs_ref();
-        let attr_version = fs.conn.current_attr_version();
+        let request_attr_version = fs.conn.current_attr_version();
         let valid = setattr_in.valid;
         let attr_out = fs.conn.setattr(self.nodeid(), setattr_in)?;
 
-        self.update_metadata_after_change(
+        self.commit_metadata_changing_reply(
             attr_out.attr,
             attr_out.attr_valid,
             attr_out.attr_valid_nsec,
-            attr_version,
-            MetadataChange::Setattr(valid),
+            request_attr_version,
+            MetadataUpdate::Setattr(valid),
             &fs,
         )?;
 
@@ -979,16 +979,16 @@ impl Inode for VirtioFsInode {
             .ok_or_else(|| Error::with_message(Errno::EXDEV, "not same fs"))?;
 
         let fs = self.fs_ref();
-        let attr_version = fs.conn.current_attr_version();
+        let request_attr_version = fs.conn.current_attr_version();
         let entry_out = fs.conn.link(old.nodeid(), self.nodeid(), name)?;
         old.lookup_count.increase();
 
-        old.update_metadata_after_change(
+        old.commit_metadata_changing_reply(
             entry_out.attr,
             entry_out.attr_valid,
             entry_out.attr_valid_nsec,
-            attr_version,
-            MetadataChange::Link,
+            request_attr_version,
+            MetadataUpdate::Link,
             &fs,
         )?;
 
