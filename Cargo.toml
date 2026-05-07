@@ -43,6 +43,7 @@ members = [
     "kernel/comps/uart",
     "kernel/comps/virtio",
     "kernel/libs/aster-bigtcp",
+    "kernel/libs/aster-fuse",
     "kernel/libs/aster-rights",
     "kernel/libs/aster-rights-proc",
     "kernel/libs/aster-util",
@@ -87,6 +88,7 @@ default-members = [
     "kernel/comps/uart",
     "kernel/comps/virtio",
     "kernel/libs/aster-bigtcp",
+    "kernel/libs/aster-fuse",
     "kernel/libs/aster-util",
     "kernel/libs/device-id",
     "kernel/libs/ring-buffer",
@@ -157,6 +159,7 @@ aster-virtio = { path = "kernel/comps/virtio" }
 
 # Crates under kernel/libs
 aster-bigtcp = { path = "kernel/libs/aster-bigtcp" }
+aster-fuse = { path = "kernel/libs/aster-fuse" }
 aster-rights = { path = "kernel/libs/aster-rights" }
 aster-rights-proc = { path = "kernel/libs/aster-rights-proc" }
 aster-util = { path = "kernel/libs/aster-util" }
@@ -184,7 +187,10 @@ bit_field = "0.10.1"
 gimli = { version = "0.28", default-features = false, features = ["read-core"] }
 minicov = "0.3"
 num-traits = { version = "0.2", default-features = false }
-serde = { version = "1.0.192", default-features = false, features = ["alloc", "derive"] }
+serde = { version = "1.0.192", default-features = false, features = [
+    "alloc",
+    "derive",
+] }
 smallvec = "1.13.2"
 uart_16550 = "0.3.0"
 volatile = "0.6.1"
@@ -201,9 +207,11 @@ aes-gcm = { version = "0.9.4", features = ["force-soft"] }
 bittle = "0.5.6"
 const_format = "0.2.35"
 ctr = "0.8.0"
-font8x8 = { version = "0.2.5", default-features = false, features = [ "unicode" ] }
+font8x8 = { version = "0.2.5", default-features = false, features = [
+    "unicode",
+] }
 getset = "0.1.2"
-hashbrown = { version = "0.14.3", features = ["serde"]  }
+hashbrown = { version = "0.14.3", features = ["serde"] }
 inventory = { git = "https://github.com/asterinas/inventory", rev = "9dce587" }
 itertools = "0.10.5"
 lending-iterator = "0.1.7"
@@ -231,13 +239,16 @@ inherit-methods-macro = { git = "https://github.com/asterinas/inherit-methods-ma
 intrusive-collections = { version = "0.9.6", features = ["nightly"] }
 libflate = { version = "2.3.0", default-features = false }
 log = "0.4"
-no_std_io2 = { version = "0.9.3", default-features = false, features = ["alloc", "nightly"] }
+no_std_io2 = { version = "0.9.3", default-features = false, features = [
+    "alloc",
+    "nightly",
+] }
 rand = { version = "0.9.2", default-features = false }
 spin = "0.9.4"
 xmas-elf = "0.10.0"
 # Note: when updating the zerocopy version, 
 # also update it in `ostd/libs/ostd-pod/README.md`.
-zerocopy = { version = "0.8.34", features = [ "derive" ] }
+zerocopy = { version = "0.8.34", features = ["derive"] }
 
 # Proc-macro dependencies
 proc-macro2 = { version = "1.0.95", features = ["span-locations"] }
