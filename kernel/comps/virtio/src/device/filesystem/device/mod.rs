@@ -20,6 +20,7 @@ use alloc::{
 use core::{
     mem::size_of,
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use aster_block::bio::BioSegment;
@@ -30,6 +31,7 @@ use aster_fuse::{
         write::{WriteIn, WriteOperation},
     },
 };
+use aster_util::slot_vec::SlotVec;
 use ostd::{
     arch::trap::TrapFrame,
     debug, info,
@@ -38,7 +40,7 @@ use ostd::{
         io::util::HasVmReaderWriter,
     },
     sync::{LocalIrqDisabled, SpinLock, Waiter, Waker},
-    timer::{Jiffies, TIMER_FREQ},
+    timer::{self, Jiffies},
     warn,
 };
 pub use session::{AttrVersion, FuseSession};
@@ -63,9 +65,10 @@ const HIPRIO_QUEUE_INDEX: u16 = 0;
 const DEFAULT_QUEUE_SIZE: u16 = 128;
 
 /// Bound FUSE waits so a stalled daemon does not block a task forever.
-const REQUEST_WAIT_TIMEOUT_JIFFIES: u64 = 10 * TIMER_FREQ;
+const REQUEST_WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 
-static FILESYSTEM_DEVICES: Once<SpinLock<Vec<Arc<FileSystemDevice>>>> = Once::new();
+static FILESYSTEM_DEVICES: Once<SpinLock<Vec<Arc<FileSystemDevice>>, LocalIrqDisabled>> =
+    Once::new();
 
 type FsInDmaBuf = FsDmaBuf<ToDevice>;
 type FsOutDmaBuf = FsDmaBuf<FromDevice>;
@@ -77,9 +80,6 @@ pub struct FileSystemDevice {
     request_queues: Vec<FsRequestQueue>,
     to_device_pool: Arc<FsDmaPool<ToDevice>>,
     from_device_pool: Arc<FsDmaPool<FromDevice>>,
-    /// Start request IDs at 1 and keep 0 unused. In FUSE,
-    /// `unique == 0` is reserved for unsolicited notification messages
-    /// rather than ordinary request/reply matching.
     next_unique: AtomicU64,
     tag: String,
     notify_supported: bool,
@@ -111,6 +111,9 @@ impl FileSystemDevice {
             request_queues,
             to_device_pool: FsDmaPool::new(),
             from_device_pool: FsDmaPool::new(),
+            // Start request IDs at 1 and keep 0 unused. In FUSE,
+            // `unique == 0` is reserved for unsolicited notification messages
+            // rather than ordinary request/reply matching.
             next_unique: AtomicU64::new(1),
             tag,
             notify_supported,
@@ -290,6 +293,7 @@ impl FuseRequest {
             out_bufs,
             wait_state: SpinLock::new(RequestWaitState {
                 completed: false,
+                timeout_deadline: None,
                 waker: None,
             }),
         }
@@ -302,17 +306,17 @@ impl FuseRequest {
             return Ok(());
         }
         let (waiter, waker) = Waiter::new_pair();
+        let timeout_deadline = Jiffies::elapsed()
+            .as_duration()
+            .saturating_add(REQUEST_WAIT_TIMEOUT);
+        wait_state.timeout_deadline = Some(timeout_deadline);
         wait_state.waker = Some(waker);
         drop(wait_state);
-
-        let timeout_deadline = Jiffies::elapsed()
-            .as_u64()
-            .saturating_add(REQUEST_WAIT_TIMEOUT_JIFFIES);
 
         let wait_res = waiter.wait_until_or_cancelled(
             || self.wait_state.lock().completed.then_some(()),
             || {
-                if Jiffies::elapsed().as_u64() >= timeout_deadline {
+                if Jiffies::elapsed().as_duration() >= timeout_deadline {
                     Err(())
                 } else {
                     Ok(())
@@ -329,6 +333,7 @@ impl FuseRequest {
             return Ok(());
         }
         wait_state.waker = None;
+        wait_state.timeout_deadline = None;
 
         Err(FuseError::Timeout)
     }
@@ -348,7 +353,7 @@ impl FuseRequest {
             .unwrap();
 
         let mut reader = out_buf.reader().unwrap();
-        let out_header: OutHeader = reader.read_val().unwrap();
+        let out_header = reader.read_val::<OutHeader>().unwrap();
 
         let out_len = out_header.len() as usize;
         let payload_len = out_len
@@ -374,10 +379,30 @@ impl FuseRequest {
         Ok(out_buf)
     }
 
-    fn mark_completed(&self) {
+    fn wake_completed(&self) {
         let waker = {
             let mut wait_state = self.wait_state.lock();
             wait_state.completed = true;
+            wait_state.timeout_deadline = None;
+            wait_state.waker.take()
+        };
+
+        if let Some(waker) = waker {
+            let _ = waker.wake_up();
+        }
+    }
+
+    fn wake_if_expired(&self, now: Duration) {
+        let waker = {
+            let mut wait_state = self.wait_state.lock();
+            if wait_state.completed
+                || !wait_state
+                    .timeout_deadline
+                    .is_some_and(|deadline| now >= deadline)
+            {
+                return;
+            }
+
             wait_state.waker.take()
         };
 
@@ -435,27 +460,21 @@ impl DmaBuf for FsOutBuf {
 
 struct FsRequestQueue {
     queue: SpinLock<VirtQueue, LocalIrqDisabled>,
-    in_flight_requests: SpinLock<Vec<Option<Arc<FuseRequest>>>, LocalIrqDisabled>,
+    in_flight_requests: SpinLock<SlotVec<Arc<FuseRequest>>, LocalIrqDisabled>,
 }
 
 impl FsRequestQueue {
     fn new(queue: VirtQueue) -> Self {
-        let queue_size = queue.available_desc();
         Self {
             queue: SpinLock::new(queue),
-            in_flight_requests: SpinLock::new(vec![None; queue_size]),
+            in_flight_requests: SpinLock::new(SlotVec::new()),
         }
     }
 }
 
 impl core::fmt::Debug for FsRequestQueue {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let in_flight_requests_len = self
-            .in_flight_requests
-            .lock()
-            .iter()
-            .filter(|request| request.is_some())
-            .count();
+        let in_flight_requests_len = self.in_flight_requests.lock().len();
 
         f.debug_struct("FsRequestQueue")
             .field("queue", &self.queue)
@@ -466,12 +485,45 @@ impl core::fmt::Debug for FsRequestQueue {
 
 struct RequestWaitState {
     completed: bool,
+    timeout_deadline: Option<Duration>,
     waker: Option<Arc<Waker>>,
+}
+
+pub(super) fn filesystem_devices() -> &'static SpinLock<Vec<Arc<FileSystemDevice>>, LocalIrqDisabled>
+{
+    FILESYSTEM_DEVICES.call_once(|| {
+        let devices = SpinLock::new(Vec::new());
+        timer::register_callback_on_cpu(wake_expired_filesystem_requests);
+        devices
+    })
+}
+
+fn wake_expired_filesystem_requests() {
+    let Some(devices) = FILESYSTEM_DEVICES.get() else {
+        return;
+    };
+
+    let now = Jiffies::elapsed().as_duration();
+    let devices = devices.lock();
+    for device in devices.iter() {
+        for queue in core::iter::once(&device.hiprio_queue).chain(device.request_queues.iter()) {
+            let requests = queue
+                .in_flight_requests
+                .lock()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+
+            requests
+                .iter()
+                .for_each(|request| request.wake_if_expired(now));
+        }
+    }
 }
 
 /// Finds the virtio-fs device registered with the given `tag`.
 pub fn find_device_by_tag(tag: &str) -> Option<Arc<FileSystemDevice>> {
     let devices = FILESYSTEM_DEVICES.get()?;
-    let devices = devices.disable_irq().lock();
+    let devices = devices.lock();
     devices.iter().find(|device| device.tag == tag).cloned()
 }

@@ -19,8 +19,8 @@ bitflags::bitflags! {
 impl FileSystemFeatures {
     /// Returns the virtio-fs feature bits supported by this driver.
     pub fn supported_features() -> Self {
-        // TODO: Create and handle the notification virtqueue.
-        Self::NOTIFICATION
+        // TODO: Notification support is not yet implemented (no notification virtqueue).
+        Self::empty()
     }
 }
 

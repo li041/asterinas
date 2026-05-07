@@ -79,11 +79,7 @@ impl FileSystemDevice {
         transport.finish_init();
         drop(transport);
 
-        FILESYSTEM_DEVICES
-            .call_once(|| SpinLock::new(Vec::new()))
-            .disable_irq()
-            .lock()
-            .push(device.clone());
+        filesystem_devices().lock().push(device.clone());
 
         info!(
             "{} initialized, tag = {}, request_queues = {}, notify = {}",
@@ -127,8 +123,7 @@ impl FileSystemDevice {
         let token_idx = token as usize;
 
         let mut in_flight_requests = request_queue.in_flight_requests.lock();
-        let slot = in_flight_requests.get_mut(token_idx).unwrap();
-        slot.replace(request.clone());
+        in_flight_requests.put_at(token_idx, request.clone());
 
         if queue.should_notify() {
             queue.notify();
@@ -149,11 +144,10 @@ impl FileSystemDevice {
             };
 
             let mut in_flight_requests = queue_state.in_flight_requests.lock();
-            let slot = in_flight_requests.get_mut(token as usize).unwrap();
-            let Some(request) = slot.take() else {
+            let Some(request) = in_flight_requests.remove(token as usize) else {
                 continue;
             };
-            request.mark_completed();
+            request.wake_completed();
         }
     }
 }
