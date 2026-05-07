@@ -22,8 +22,13 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use aster_block::bio::BioSegment;
 use aster_fuse::{
     FUSE_ROOT_ID, ForgetIn, ForgetOperation, FuseError, FuseNodeId, FuseOperation, OutHeader,
+    ops::{
+        read::{ReadIn, ReadOperation},
+        write::{WriteIn, WriteOperation},
+    },
 };
 use ostd::{
     arch::trap::TrapFrame,
@@ -46,6 +51,7 @@ use super::{
 };
 use crate::{
     device::VirtioDeviceError,
+    dma_buf::DmaBuf,
     queue::{PopUsedError, VirtQueue},
     transport::VirtioTransport,
 };
@@ -61,8 +67,8 @@ const REQUEST_WAIT_TIMEOUT_JIFFIES: u64 = 10 * TIMER_FREQ;
 
 static FILESYSTEM_DEVICES: Once<SpinLock<Vec<Arc<FileSystemDevice>>>> = Once::new();
 
-type FsInBuf = FsDmaBuf<ToDevice>;
-type FsOutBuf = FsDmaBuf<FromDevice>;
+type FsInDmaBuf = FsDmaBuf<ToDevice>;
+type FsOutDmaBuf = FsDmaBuf<FromDevice>;
 
 /// A virtiofs device that issues FUSE requests to a backend server.
 pub struct FileSystemDevice {
@@ -126,6 +132,49 @@ impl FileSystemDevice {
         request.read_reply(operation)
     }
 
+    pub(crate) fn read(
+        &self,
+        nodeid: FuseNodeId,
+        read_in: ReadIn,
+        bio_segment: BioSegment,
+    ) -> Result<usize, FuseError> {
+        let len = read_in.size() as usize;
+        let mut operation = ReadOperation::new(read_in);
+        let request = Arc::new(self.prepare_read_request(nodeid, &mut operation, bio_segment)?);
+        let queue = self.select_request_queue(request.nodeid);
+        self.submit(queue, request.clone());
+
+        request.wait()?;
+
+        let read_len = request.read_reply(operation)?;
+        if read_len > len {
+            return Err(FuseError::MalformedResponse);
+        }
+
+        Ok(read_len)
+    }
+
+    pub(crate) fn write(
+        &self,
+        nodeid: FuseNodeId,
+        write_in: WriteIn,
+        bio_segment: BioSegment,
+    ) -> Result<usize, FuseError> {
+        let mut operation = WriteOperation::new(write_in);
+        let request = Arc::new(self.prepare_write_request(nodeid, &mut operation, bio_segment)?);
+        let queue = self.select_request_queue(request.nodeid);
+        self.submit(queue, request.clone());
+
+        request.wait()?;
+        let write_out = request.read_reply(operation)?;
+
+        if write_out.size() > write_in.size() as usize {
+            return Err(FuseError::MalformedResponse);
+        }
+
+        Ok(write_out.size())
+    }
+
     /// Sends a `FUSE_FORGET` request on the high-priority queue.
     ///
     /// `FUSE_FORGET` is a no-reply request. The backend must not send a
@@ -163,7 +212,48 @@ impl FileSystemDevice {
             .map(|payload_size| self.prepare_out_buf(payload_size))
             .transpose()?;
 
-        Ok(FuseRequest::new(unique, nodeid, in_buf, out_buf))
+        Ok(FuseRequest::new(
+            unique,
+            nodeid,
+            vec![FsInBuf::Dma(in_buf)],
+            out_buf.map(|out_buf| vec![FsOutBuf::Dma(out_buf)]),
+        ))
+    }
+
+    fn prepare_read_request(
+        &self,
+        nodeid: FuseNodeId,
+        operation: &mut ReadOperation,
+        bio_segment: BioSegment,
+    ) -> Result<FuseRequest, FuseError> {
+        let unique = self.alloc_unique();
+        let in_buf = self.prepare_in_buf(nodeid, operation, unique)?;
+        let out_buf = self.prepare_out_header_buf()?;
+
+        Ok(FuseRequest::new(
+            unique,
+            nodeid,
+            vec![FsInBuf::Dma(in_buf)],
+            Some(vec![FsOutBuf::Dma(out_buf), FsOutBuf::Bio(bio_segment)]),
+        ))
+    }
+
+    fn prepare_write_request(
+        &self,
+        nodeid: FuseNodeId,
+        operation: &mut WriteOperation,
+        bio_segment: BioSegment,
+    ) -> Result<FuseRequest, FuseError> {
+        let unique = self.alloc_unique();
+        let in_buf = self.prepare_in_buf(nodeid, operation, unique)?;
+        let out_buf = self.prepare_out_buf(operation.out_payload_size().unwrap())?;
+
+        Ok(FuseRequest::new(
+            unique,
+            nodeid,
+            vec![FsInBuf::Dma(in_buf), FsInBuf::Bio(bio_segment)],
+            Some(vec![FsOutBuf::Dma(out_buf)]),
+        ))
     }
 
     fn select_request_queue(&self, nodeid: FuseNodeId) -> &FsRequestQueue {
@@ -181,18 +271,23 @@ impl FileSystemDevice {
 pub(super) struct FuseRequest {
     unique: u64,
     nodeid: FuseNodeId,
-    in_buf: FsInBuf,
-    out_buf: Option<FsOutBuf>,
+    in_bufs: Vec<FsInBuf>,
+    out_bufs: Option<Vec<FsOutBuf>>,
     wait_state: SpinLock<RequestWaitState, LocalIrqDisabled>,
 }
 
 impl FuseRequest {
-    fn new(unique: u64, nodeid: FuseNodeId, in_buf: FsInBuf, out_buf: Option<FsOutBuf>) -> Self {
+    fn new(
+        unique: u64,
+        nodeid: FuseNodeId,
+        in_bufs: Vec<FsInBuf>,
+        out_bufs: Option<Vec<FsOutBuf>>,
+    ) -> Self {
         Self {
             unique,
             nodeid,
-            in_buf,
-            out_buf,
+            in_bufs,
+            out_bufs,
             wait_state: SpinLock::new(RequestWaitState {
                 completed: false,
                 waker: None,
@@ -245,7 +340,7 @@ impl FuseRequest {
         &self,
         operation: Op,
     ) -> Result<Op::Output, FuseError> {
-        let out_buf = self.out_buf.as_ref().unwrap();
+        let out_buf = self.out_header_buf()?;
 
         out_buf
             .mem_obj()
@@ -269,6 +364,16 @@ impl FuseRequest {
         operation.parse_reply(payload_len, &mut reader)
     }
 
+    fn out_header_buf(&self) -> Result<&FsOutDmaBuf, FuseError> {
+        let Some(out_bufs) = self.out_bufs.as_ref() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        let Some(FsOutBuf::Dma(out_buf)) = out_bufs.first() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        Ok(out_buf)
+    }
+
     fn mark_completed(&self) {
         let waker = {
             let mut wait_state = self.wait_state.lock();
@@ -278,6 +383,52 @@ impl FuseRequest {
 
         if let Some(waker) = waker {
             let _ = waker.wake_up();
+        }
+    }
+}
+
+enum FsInBuf {
+    Dma(FsInDmaBuf),
+    Bio(BioSegment),
+}
+
+impl ostd::mm::HasDaddr for FsInBuf {
+    fn daddr(&self) -> ostd::mm::Daddr {
+        match self {
+            Self::Dma(buf) => buf.daddr(),
+            Self::Bio(segment) => segment.inner_dma_slice().daddr(),
+        }
+    }
+}
+
+impl DmaBuf for FsInBuf {
+    fn len(&self) -> usize {
+        match self {
+            Self::Dma(buf) => buf.len(),
+            Self::Bio(segment) => segment.nbytes(),
+        }
+    }
+}
+
+enum FsOutBuf {
+    Dma(FsOutDmaBuf),
+    Bio(BioSegment),
+}
+
+impl ostd::mm::HasDaddr for FsOutBuf {
+    fn daddr(&self) -> ostd::mm::Daddr {
+        match self {
+            Self::Dma(buf) => buf.daddr(),
+            Self::Bio(segment) => segment.inner_dma_slice().daddr(),
+        }
+    }
+}
+
+impl DmaBuf for FsOutBuf {
+    fn len(&self) -> usize {
+        match self {
+            Self::Dma(buf) => buf.len(),
+            Self::Bio(segment) => segment.nbytes(),
         }
     }
 }

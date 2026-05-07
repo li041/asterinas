@@ -9,7 +9,7 @@
 use core::mem::size_of;
 
 use bitflags::bitflags;
-use ostd::mm::{FallibleVmRead, Infallible, VmReader, VmWriter};
+use ostd::mm::{Infallible, VmReader, VmWriter};
 
 use crate::{FuseError, FuseFileHandle, FuseOpcode, FuseOperation, FuseResult};
 
@@ -63,6 +63,11 @@ impl WriteIn {
             padding: 0,
         }
     }
+
+    /// Returns the number of bytes to write.
+    pub fn size(&self) -> u32 {
+        self.size
+    }
 }
 
 #[repr(C)]
@@ -75,49 +80,41 @@ pub struct WriteOut {
 
 impl WriteOut {
     /// Returns the number of bytes written by the server.
-    pub fn size(&self) -> u32 {
-        self.size
+    pub fn size(&self) -> usize {
+        self.size as usize
     }
 }
 
-pub struct WriteOperation<'a, 'b> {
+pub struct WriteOperation {
     write_in: WriteIn,
-    reader: &'a mut VmReader<'b>,
 }
 
-impl<'a, 'b> WriteOperation<'a, 'b> {
-    pub fn new(write_in: WriteIn, reader: &'a mut VmReader<'b>) -> Self {
-        Self { write_in, reader }
+impl WriteOperation {
+    pub fn new(write_in: WriteIn) -> Self {
+        Self { write_in }
+    }
+
+    /// Returns the number of payload bytes to write.
+    pub fn payload_size(&self) -> usize {
+        self.write_in.size() as usize
     }
 }
 
-impl FuseOperation for WriteOperation<'_, '_> {
-    type Output = usize;
+impl FuseOperation for WriteOperation {
+    type Output = WriteOut;
 
     fn opcode(&self) -> FuseOpcode {
         FuseOpcode::Write
     }
 
     fn body_len(&self) -> usize {
-        size_of::<WriteIn>().saturating_add(self.reader.remain())
+        size_of::<WriteIn>()
     }
 
     fn write_body(&mut self, writer: &mut VmWriter<'_, Infallible>) -> FuseResult<()> {
-        if writer.avail() < self.body_len() {
-            return Err(FuseError::BufferTooSmall);
-        }
-
-        writer.write_val(&self.write_in).unwrap();
-
-        let mut new_reader = self.reader.clone();
-
-        let bytes_written = new_reader
-            .read_fallible(writer)
-            .map_err(|_| FuseError::PageFault)?;
-
-        self.reader.skip(bytes_written);
-
-        Ok(())
+        writer
+            .write_val(&self.write_in)
+            .map_err(|_| FuseError::BufferTooSmall)
     }
 
     fn out_payload_size(&self) -> Option<usize> {
@@ -126,10 +123,15 @@ impl FuseOperation for WriteOperation<'_, '_> {
 
     fn parse_reply(
         self,
-        _payload_len: usize,
+        payload_len: usize,
         reader: &mut VmReader<'_, Infallible>,
     ) -> FuseResult<Self::Output> {
-        let write_out: WriteOut = reader.read_val().map_err(|_| FuseError::PageFault)?;
-        Ok(write_out.size() as usize)
+        if payload_len != size_of::<WriteOut>() {
+            return Err(FuseError::MalformedResponse);
+        }
+
+        let write_out: WriteOut = reader.read_val().unwrap();
+
+        Ok(write_out)
     }
 }

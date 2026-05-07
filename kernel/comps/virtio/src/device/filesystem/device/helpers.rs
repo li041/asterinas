@@ -34,7 +34,7 @@ impl FileSystemDevice {
         nodeid: FuseNodeId,
         operation: &mut impl FuseOperation,
         unique: u64,
-    ) -> Result<FsInBuf, FuseError> {
+    ) -> Result<FsInDmaBuf, FuseError> {
         let total_len = size_of::<InHeader>() + operation.body_len();
         let in_buf = self
             .to_device_pool
@@ -55,10 +55,16 @@ impl FileSystemDevice {
         Ok(in_buf)
     }
 
-    pub(super) fn prepare_out_buf(&self, payload_size: usize) -> Result<FsOutBuf, FuseError> {
+    pub(super) fn prepare_out_buf(&self, payload_size: usize) -> Result<FsOutDmaBuf, FuseError> {
         let total_len = size_of::<OutHeader>() + payload_size;
         self.from_device_pool
             .alloc_fs_buf(total_len)
+            .map_err(FuseError::ResourceAlloc)
+    }
+
+    pub(super) fn prepare_out_header_buf(&self) -> Result<FsOutDmaBuf, FuseError> {
+        self.from_device_pool
+            .alloc_fs_buf(size_of::<OutHeader>())
             .map_err(FuseError::ResourceAlloc)
     }
 }

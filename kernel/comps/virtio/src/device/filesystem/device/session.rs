@@ -8,6 +8,7 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use aster_block::bio::BioSegment;
 use aster_fuse::{
     EntryOut, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID, FuseDirEntry,
     FuseError, FuseFileHandle, FuseNodeId, LseekOut, MIN_MAX_WRITE, OpenOut,
@@ -21,21 +22,17 @@ use aster_fuse::{
         mkdir::{MkdirIn, MkdirOperation},
         mknod::{MknodIn, MknodOperation},
         open::{OpenIn, OpenOperation, OpendirOperation},
-        read::{ReadIn, ReadOperation},
+        read::ReadIn,
         readdir::ReaddirOperation,
         readlink::ReadlinkOperation,
         release::{ReleaseFlags, ReleaseIn, ReleaseKind, ReleaseOperation},
         rmdir::RmdirOperation,
         setattr::{SetattrIn, SetattrOperation},
         unlink::UnlinkOperation,
-        write::{WriteFlags, WriteIn, WriteOperation},
+        write::WriteIn,
     },
 };
-use ostd::{
-    info,
-    mm::{VmReader, VmWriter},
-    warn,
-};
+use ostd::{info, warn};
 
 use super::{super::DEVICE_NAME, FileSystemDevice};
 
@@ -271,59 +268,29 @@ impl FuseSession {
         offset: u64,
         size: u32,
         flags: u32,
-        writer: &mut VmWriter,
+        bio_segment: BioSegment,
     ) -> Result<usize, FuseError> {
-        self.device.do_fuse_op(
+        let read_len = self.device.read(
             nodeid,
-            ReadOperation::new(ReadIn::new(fh, offset, size, flags), writer),
-        )
+            ReadIn::new(fh, offset, size, flags),
+            bio_segment.clone(),
+        )?;
+        bio_segment.inner_dma_slice().sync_from_device().unwrap();
+
+        Ok(read_len)
     }
 
     pub fn write(
         &self,
         nodeid: FuseNodeId,
-        fh: FuseFileHandle,
-        offset: u64,
-        flags: u32,
-        write_flags: WriteFlags,
-        reader: &mut VmReader,
+        write_in: WriteIn,
+        bio_segment: BioSegment,
     ) -> Result<usize, FuseError> {
-        let mut total_written = 0usize;
+        bio_segment.inner_dma_slice().sync_to_device().unwrap();
 
-        while reader.has_remain() {
-            let write_size = reader.remain().min(self.max_write as usize);
+        let written_len = self.device.write(nodeid, write_in, bio_segment)?;
 
-            let mut request_reader = reader.clone();
-            request_reader.limit(write_size);
-
-            let request_offset = offset
-                .checked_add(total_written as u64)
-                .ok_or(FuseError::LengthOverflow)?;
-            let written = self.device.do_fuse_op(
-                nodeid,
-                WriteOperation::new(
-                    WriteIn::new(fh, request_offset, write_size as u32, flags, write_flags),
-                    &mut request_reader,
-                ),
-            )?;
-
-            if written > write_size {
-                return Err(FuseError::MalformedResponse);
-            }
-            if written == 0 {
-                break;
-            }
-
-            reader.skip(written);
-            total_written = total_written
-                .checked_add(written)
-                .ok_or(FuseError::LengthOverflow)?;
-            if written < write_size {
-                break;
-            }
-        }
-
-        Ok(total_written)
+        Ok(written_len)
     }
 
     /// Releases the file or directory handle `fh` on `nodeid`.
