@@ -115,10 +115,14 @@ impl FileSystemDevice {
         request: Arc<FuseRequest>,
     ) -> Arc<FuseRequest> {
         let mut queue = request_queue.queue.lock();
-        let input_slices = [&request.in_buf];
-        let token = match request.out_buf.as_ref() {
-            Some(out_buf) => queue.add_dma_bufs(&input_slices, &[out_buf]).unwrap(),
-            None => queue.add_input_bufs(&input_slices).unwrap(),
+        let input_bufs = request.in_bufs.iter().collect::<Vec<_>>();
+
+        let token = match request.out_bufs.as_ref() {
+            Some(out_bufs) => {
+                let output_bufs = out_bufs.iter().collect::<Vec<_>>();
+                queue.add_dma_bufs(&input_bufs, &output_bufs).unwrap()
+            }
+            None => queue.add_input_bufs(&input_bufs).unwrap(),
         };
         let token_idx = token as usize;
 

@@ -9,7 +9,7 @@
 use core::mem::size_of;
 
 use bitflags::bitflags;
-use ostd::mm::{FallibleVmRead, Infallible, VmReader, VmWriter};
+use ostd::mm::{Infallible, VmReader, VmWriter};
 
 use crate::{FuseError, FuseFileHandle, FuseOpcode, FuseOperation, FuseResult};
 
@@ -43,6 +43,10 @@ impl ReadIn {
             padding: 0,
         }
     }
+
+    pub fn size(&self) -> u32 {
+        self.size
+    }
 }
 
 bitflags! {
@@ -57,18 +61,17 @@ bitflags! {
     }
 }
 
-pub struct ReadOperation<'a, 'b> {
+pub struct ReadOperation {
     read_in: ReadIn,
-    writer: &'a mut VmWriter<'b>,
 }
 
-impl<'a, 'b> ReadOperation<'a, 'b> {
-    pub fn new(read_in: ReadIn, writer: &'a mut VmWriter<'b>) -> Self {
-        Self { read_in, writer }
+impl ReadOperation {
+    pub fn new(read_in: ReadIn) -> Self {
+        Self { read_in }
     }
 }
 
-impl FuseOperation for ReadOperation<'_, '_> {
+impl FuseOperation for ReadOperation {
     type Output = usize;
 
     fn opcode(&self) -> FuseOpcode {
@@ -86,21 +89,14 @@ impl FuseOperation for ReadOperation<'_, '_> {
     }
 
     fn out_payload_size(&self) -> Option<usize> {
-        Some(self.read_in.size as usize)
+        Some(size_of::<ReadIn>())
     }
+
     fn parse_reply(
         self,
         _payload_len: usize,
-        reader: &mut VmReader<'_, Infallible>,
+        _reader: &mut VmReader<'_, Infallible>,
     ) -> FuseResult<Self::Output> {
-        let mut new_writer = self.writer.clone_exclusive();
-
-        let bytes_read = reader
-            .read_fallible(&mut new_writer)
-            .map_err(|_| FuseError::PageFault)?;
-
-        self.writer.skip(bytes_read);
-
-        Ok(bytes_read)
+        Ok(self.read_in.size() as usize)
     }
 }
