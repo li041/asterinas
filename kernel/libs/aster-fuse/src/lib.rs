@@ -34,7 +34,7 @@ mod error;
 mod operation;
 pub mod ops;
 
-use alloc::string::String;
+use alloc::{boxed::Box, string::String};
 use core::sync::atomic::AtomicU64;
 
 use int_to_c_enum::TryFromInt;
@@ -78,6 +78,25 @@ pub const FUSE_KERNEL_MINOR_VERSION: u32 = 38;
 /// Even if the daemon reports a smaller `max_write` in `FUSE_INIT`, the client
 /// uses at least one page (4096 bytes) per write request.
 pub const MIN_MAX_WRITE: u32 = 4096;
+
+/// A FUSE request identifier (`unique`) exchanged on the protocol.
+///
+/// The client assigns one `FuseUnique` to each request and the server copies it
+/// into the matching reply. The value `0` is reserved for unsolicited
+/// notifications rather than ordinary request/reply matching.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod)]
+pub struct FuseUnique(u64);
+
+impl FuseUnique {
+    pub const fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
 
 /// An opaque FUSE file handle issued by the server.
 ///
@@ -147,7 +166,7 @@ pub struct InHeader {
     /// Operation code identifying the request payload format.
     opcode: u32,
     /// Request identifier copied into the matching [`OutHeader`].
-    unique: u64,
+    unique: FuseUnique,
     /// Target inode of the request.
     nodeid: FuseNodeId,
     /// User ID of the requesting process.
@@ -163,7 +182,7 @@ pub struct InHeader {
 
 impl InHeader {
     /// Creates an `InHeader` with the provided core fields.
-    pub const fn new(len: u32, opcode: u32, unique: u64, nodeid: FuseNodeId) -> Self {
+    pub const fn new(len: u32, opcode: u32, unique: FuseUnique, nodeid: FuseNodeId) -> Self {
         Self {
             len,
             opcode,
@@ -188,7 +207,7 @@ impl InHeader {
     }
 
     /// Returns the request identifier copied into the matching reply.
-    pub fn unique(&self) -> u64 {
+    pub fn unique(&self) -> FuseUnique {
         self.unique
     }
 
@@ -212,17 +231,17 @@ pub struct OutHeader {
     /// Operation result as `0` on success or a negated errno on failure.
     error: i32,
     /// Request identifier copied from the matching [`InHeader`].
-    unique: u64,
+    unique: FuseUnique,
 }
 
 impl OutHeader {
-    pub const fn new(len: u32, error: i32, unique: u64) -> Self {
+    pub const fn new(len: u32, error: i32, unique: FuseUnique) -> Self {
         Self { len, error, unique }
     }
 
     /// Returns an empty [`OutHeader`].
     pub const fn empty() -> Self {
-        Self::new(0, 0, 0)
+        Self::new(0, 0, FuseUnique::new(0))
     }
 
     /// Returns the total reply length in bytes, including this header.
@@ -236,7 +255,7 @@ impl OutHeader {
     }
 
     /// Returns the request identifier copied from the matching request.
-    pub fn unique(&self) -> u64 {
+    pub fn unique(&self) -> FuseUnique {
         self.unique
     }
 
@@ -584,3 +603,40 @@ pub enum FuseOpcode {
     SyncFs = 50,
     Tmpfile = 51,
 }
+
+/// The status of a submitted FUSE request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FuseStatus {
+    /// The request has not completed yet.
+    Pending,
+    /// The request completed successfully.
+    Complete,
+    /// The request failed.
+    Error(FuseStatusError),
+}
+
+impl FuseStatus {
+    /// Returns whether the request is still pending.
+    pub fn is_pending(self) -> bool {
+        self == Self::Pending
+    }
+}
+
+/// The error status of a submitted FUSE request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FuseStatusError {
+    /// The request timed out without receiving a response.
+    Timeout,
+    /// The backend returned a malformed response.
+    MalformedResponse,
+    /// The backend returned a well-formed reply whose `error` field is non-zero.
+    ///
+    /// Synchronous callers should still parse the reply header afterwards to
+    /// retrieve the concrete remote errno.
+    RemoteError,
+}
+
+/// The completion function type for FUSE operations.
+///
+/// The function receives the final [`FuseStatus`] of the FUSE operation.
+pub type FuseCompleteFn = Box<dyn FnOnce(FuseStatus) + Send>;

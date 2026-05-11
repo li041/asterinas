@@ -7,10 +7,12 @@
 
 use core::mem::size_of;
 
-use aster_fuse::{InHeader, OutHeader};
+use aster_fuse::{FuseUnique, InHeader, OutHeader};
+use aster_util::mem_obj_slice::Slice;
 use ostd::mm::io::util::HasVmReaderWriter;
 
 use super::*;
+use crate::device::filesystem::pool::FsDmaStorage;
 
 impl FileSystemDevice {
     pub(super) fn parse_tag(raw_tag: &[u8; 36]) -> &str {
@@ -25,16 +27,16 @@ impl FileSystemDevice {
         }
     }
 
-    pub(super) fn alloc_unique(&self) -> u64 {
-        self.next_unique.fetch_add(1, Ordering::Relaxed)
+    pub(super) fn alloc_unique(&self) -> FuseUnique {
+        FuseUnique::new(self.next_unique.fetch_add(1, Ordering::Relaxed))
     }
 
     pub(super) fn prepare_in_buf(
         &self,
         nodeid: FuseNodeId,
         operation: &mut impl FuseOperation,
-        unique: u64,
-    ) -> Result<FsInDmaBuf, FuseError> {
+        unique: FuseUnique,
+    ) -> Result<Arc<Slice<FsDmaStorage<ToDevice>>>, FuseError> {
         let total_len = size_of::<InHeader>() + operation.body_len();
         let in_buf = self
             .to_device_pool
@@ -55,14 +57,19 @@ impl FileSystemDevice {
         Ok(in_buf)
     }
 
-    pub(super) fn prepare_out_buf(&self, payload_size: usize) -> Result<FsOutDmaBuf, FuseError> {
+    pub(super) fn prepare_out_buf(
+        &self,
+        payload_size: usize,
+    ) -> Result<Arc<Slice<FsDmaStorage<FromDevice>>>, FuseError> {
         let total_len = size_of::<OutHeader>() + payload_size;
         self.from_device_pool
             .alloc_fs_buf(total_len)
             .map_err(FuseError::ResourceAlloc)
     }
 
-    pub(super) fn prepare_out_header_buf(&self) -> Result<FsOutDmaBuf, FuseError> {
+    pub(super) fn prepare_out_header_buf(
+        &self,
+    ) -> Result<Arc<Slice<FsDmaStorage<FromDevice>>>, FuseError> {
         self.from_device_pool
             .alloc_fs_buf(size_of::<OutHeader>())
             .map_err(FuseError::ResourceAlloc)

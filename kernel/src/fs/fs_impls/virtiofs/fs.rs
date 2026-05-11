@@ -15,7 +15,7 @@ use alloc::{
 };
 use core::time::Duration;
 
-use aster_fuse::FUSE_ROOT_ID;
+use aster_fuse::{FUSE_ROOT_ID, ops::lookup::LookupOperation};
 use aster_virtio::device::filesystem::device::{self, FileSystemDevice, FuseSession};
 
 use self::inode::VirtioFsInode;
@@ -89,7 +89,7 @@ impl VirtioFs {
             AnonDeviceId::acquire().expect("no device ID is available for virtiofs");
         let container_dev_id = anon_device_id.id();
 
-        let root_entry = session.lookup(FUSE_ROOT_ID, ".")?;
+        let root_entry = session.do_fuse_op(FUSE_ROOT_ID, LookupOperation::new("."))?;
         let root_metadata = super::metadata_from_attr(root_entry.attr(), container_dev_id);
         let now = MonotonicCoarseClock::get().read_time();
         let attr_valid_until =

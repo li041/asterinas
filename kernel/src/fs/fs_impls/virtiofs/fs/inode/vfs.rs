@@ -5,7 +5,21 @@
 use alloc::sync::Arc;
 use core::time::Duration;
 
-use aster_fuse::{FuseAttrOut, FuseOpenFlags, ReleaseFlags, ReleaseKind, SetattrIn, SetattrValid};
+use aster_fuse::{
+    FuseAttrOut, FuseOpenFlags, ReleaseFlags, ReleaseKind, SetattrIn, SetattrValid,
+    ops::{
+        create::{CreateIn, CreateOperation},
+        link::{LinkIn, LinkOperation},
+        lookup::LookupOperation,
+        mkdir::{MkdirIn, MkdirOperation},
+        mknod::{MknodIn, MknodOperation},
+        open::{OpenIn, OpendirOperation},
+        readlink::ReadlinkOperation,
+        rmdir::RmdirOperation,
+        setattr::SetattrOperation,
+        unlink::UnlinkOperation,
+    },
+};
 
 use super::{MetadataUpdate, VirtioFsInode};
 use crate::{
@@ -122,7 +136,9 @@ impl Inode for VirtioFsInode {
     fn lookup(&self, name: &str) -> Result<Arc<dyn Inode>> {
         let fs = self.fs_ref();
         let parent_nodeid = self.nodeid();
-        let entry_out = fs.session.lookup(parent_nodeid, name)?;
+        let entry_out = fs
+            .session
+            .do_fuse_op(parent_nodeid, LookupOperation::new(name))?;
         let nodeid = entry_out.nodeid();
 
         let now = MonotonicCoarseClock::get().read_time();
@@ -149,10 +165,13 @@ impl Inode for VirtioFsInode {
         let parent_nodeid = self.nodeid();
         let entry_out = match type_ {
             InodeType::File => {
-                let (entry_out, open_out) = fs.session.create(
+                let create_mode = u32::from(InodeType::File) | u32::from(mode.bits());
+                let (entry_out, open_out) = fs.session.do_fuse_op(
                     parent_nodeid,
-                    name,
-                    u32::from(InodeType::File) | u32::from(mode.bits()),
+                    CreateOperation::new(
+                        CreateIn::new(AccessMode::O_RDWR as u32, create_mode),
+                        name,
+                    ),
                 )?;
                 fs.session.release(
                     entry_out.nodeid(),
@@ -163,16 +182,19 @@ impl Inode for VirtioFsInode {
                 );
                 entry_out
             }
-            InodeType::Dir => fs.session.mkdir(
+            InodeType::Dir => fs.session.do_fuse_op(
                 parent_nodeid,
-                name,
-                u32::from(InodeType::Dir) | u32::from(mode.bits()),
+                MkdirOperation::new(
+                    MkdirIn::new(u32::from(InodeType::Dir) | u32::from(mode.bits())),
+                    name,
+                ),
             )?,
-            InodeType::Socket => fs.session.mknod(
+            InodeType::Socket => fs.session.do_fuse_op(
                 parent_nodeid,
-                name,
-                u32::from(InodeType::Socket) | u32::from(mode.bits()),
-                0,
+                MknodOperation::new(
+                    MknodIn::new(u32::from(InodeType::Socket) | u32::from(mode.bits()), 0),
+                    name,
+                ),
             )?,
             _ => {
                 return_errno_with_message!(
@@ -197,7 +219,10 @@ impl Inode for VirtioFsInode {
 
         let fs = self.fs_ref();
         let request_attr_version = fs.session.snapshot_attr_version();
-        let entry_out = fs.session.link(old.nodeid(), self.nodeid(), name)?;
+        let entry_out = fs.session.do_fuse_op(
+            self.nodeid(),
+            LinkOperation::new(LinkIn::new(old.nodeid()), name),
+        )?;
         old.lookup_count.increase();
 
         old.commit_metadata_changing_reply(
@@ -214,19 +239,23 @@ impl Inode for VirtioFsInode {
 
     fn unlink(&self, name: &str) -> Result<()> {
         let fs = self.fs_ref();
-        fs.session.unlink(self.nodeid(), name)?;
+        fs.session
+            .do_fuse_op(self.nodeid(), UnlinkOperation::new(name))?;
         Ok(())
     }
 
     fn rmdir(&self, name: &str) -> Result<()> {
         let fs = self.fs_ref();
-        fs.session.rmdir(self.nodeid(), name)?;
+        fs.session
+            .do_fuse_op(self.nodeid(), RmdirOperation::new(name))?;
         Ok(())
     }
 
     fn readdir_at(&self, offset: usize, visitor: &mut dyn DirentVisitor) -> Result<usize> {
         let fs = self.fs_ref();
-        let open_out = fs.session.opendir(self.nodeid())?;
+        let open_out = fs
+            .session
+            .do_fuse_op(self.nodeid(), OpendirOperation::new(OpenIn::new(0)))?;
         let open_flags = open_out.open_flags();
         if !open_flags.contains(FuseOpenFlags::FOPEN_KEEP_CACHE) {
             self.invalidate_whole_page_cache()?;
@@ -277,7 +306,7 @@ impl Inode for VirtioFsInode {
         }
 
         let fs = self.fs_ref();
-        let target = fs.session.readlink(self.nodeid())?;
+        let target = fs.session.do_fuse_op(self.nodeid(), ReadlinkOperation)?;
 
         Ok(SymbolicLink::Plain(target))
     }

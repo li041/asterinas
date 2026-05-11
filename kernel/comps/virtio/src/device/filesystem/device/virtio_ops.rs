@@ -105,17 +105,17 @@ impl FileSystemDevice {
         VirtQueue::new(index, queue_size, transport).map_err(Into::into)
     }
 
-    pub(super) fn submit(
-        &self,
-        request_queue: &FsRequestQueue,
-        request: Arc<FuseRequest>,
-    ) -> Arc<FuseRequest> {
+    pub(super) fn submit(&self, request_queue: &FsRequestQueue, request: Arc<FuseRequest>) {
         let mut queue = request_queue.queue.lock();
-        let input_bufs = request.in_bufs.iter().collect::<Vec<_>>();
+        let input_bufs = request
+            .in_bufs
+            .iter()
+            .map(|arc| arc.as_ref())
+            .collect::<Vec<&_>>();
 
-        let token = match request.out_bufs.as_ref() {
+        let token = match request.wait_state.out_bufs.as_ref() {
             Some(out_bufs) => {
-                let output_bufs = out_bufs.iter().collect::<Vec<_>>();
+                let output_bufs = out_bufs.iter().map(|arc| arc.as_ref()).collect::<Vec<&_>>();
                 queue.add_dma_bufs(&input_bufs, &output_bufs).unwrap()
             }
             None => queue.add_input_bufs(&input_bufs).unwrap(),
@@ -123,29 +123,29 @@ impl FileSystemDevice {
         let token_idx = token as usize;
 
         let mut in_flight_requests = request_queue.in_flight_requests.lock();
-        in_flight_requests.put_at(token_idx, request.clone());
+        in_flight_requests.put_at(token_idx, request);
 
         if queue.should_notify() {
             queue.notify();
         }
-
-        request
     }
 
     pub(super) fn handle_queue_irq(&self, queue_state: &FsRequestQueue) {
         loop {
-            let mut queue = queue_state.queue.lock();
-
             let token = {
+                let mut queue = queue_state.queue.lock();
                 match queue.pop_used() {
                     Ok((token, _)) => token,
                     Err(PopUsedError::NotReady) => break,
                 }
             };
 
-            let mut in_flight_requests = queue_state.in_flight_requests.lock();
-            let Some(request) = in_flight_requests.remove(token as usize) else {
-                continue;
+            let request = {
+                let mut in_flight_requests = queue_state.in_flight_requests.lock();
+                let Some(request) = in_flight_requests.remove(token as usize) else {
+                    continue;
+                };
+                request
             };
             request.wake_completed();
         }

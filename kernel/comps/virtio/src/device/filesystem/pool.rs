@@ -13,8 +13,8 @@ use aster_util::mem_obj_slice::Slice;
 use ostd::{
     Result,
     mm::{
-        HasDaddr, HasSize, Infallible, PAGE_SIZE, VmReader, VmWriter,
-        dma::{DmaDirection, DmaStream},
+        HasDaddr, HasSize, Infallible, PAGE_SIZE, USegment, VmReader, VmWriter,
+        dma::{DmaDirection, DmaStream, FromDevice, ToDevice},
         io::util::{HasVmReaderWriter, VmReaderWriterResult},
     },
 };
@@ -38,9 +38,6 @@ const POOL_INIT_SIZE: usize = 8;
 /// Retain enough free segments for bursts
 const POOL_HIGH_WATERMARK: usize = 64;
 
-/// A DMA-backed virtio-fs buffer slice.
-pub type FsDmaBuf<D> = Slice<FsDmaStorage<D>>;
-
 /// A size-classed allocator for virtio-fs DMA buffers.
 #[derive(Debug)]
 pub struct FsDmaPool<D: DmaDirection> {
@@ -58,7 +55,7 @@ impl<D: DmaDirection> FsDmaPool<D> {
     }
 
     /// Allocates a DMA buffer whose visible length is `len`.
-    pub fn alloc_fs_buf(&self, len: usize) -> Result<FsDmaBuf<D>> {
+    pub fn alloc_fs_buf(&self, len: usize) -> Result<Arc<Slice<FsDmaStorage<D>>>> {
         let storage = if len <= MAX_CLASS_SIZE {
             let shift = len.next_power_of_two().trailing_zeros().max(MIN_SHIFT);
             let segment = self.classes[(shift - MIN_SHIFT) as usize].alloc_segment()?;
@@ -68,15 +65,35 @@ impl<D: DmaDirection> FsDmaPool<D> {
             FsDmaStorage::Stream(stream)
         };
 
-        Ok(Slice::new(storage, 0..len))
+        Ok(Arc::new(Slice::new(storage, 0..len)))
     }
 }
+
+/// The buffer with data payload which will be used in FUSE I/O operations.
+pub enum FuseDataBuf {
+    Read(FuseReadBuf),
+    Write(FuseWriteBuf),
+}
+
+/// A DMA buffer with data payload used by `FUSE_READ`.
+pub type FuseReadBuf = Arc<Slice<FsDmaStorage<FromDevice>>>;
+
+/// A DMA buffer with data payload used by `FUSE_WRITE`.
+pub type FuseWriteBuf = Arc<Slice<FsDmaStorage<ToDevice>>>;
 
 /// The backing storage for a virtio-fs DMA buffer.
 #[derive(Debug)]
 pub enum FsDmaStorage<D: DmaDirection> {
     Stream(DmaStream<D>),
     Segment(DmaSegment<D>),
+}
+
+impl<D: DmaDirection> FsDmaStorage<D> {
+    /// Constructs a new `FsDmaStorage` with a given `USegment`.
+    pub fn new_from_segment(segment: USegment) -> Self {
+        let dma_stream = DmaStream::map(segment, false).unwrap();
+        Self::Stream(dma_stream)
+    }
 }
 
 impl<D: DmaDirection> FsDmaStorage<D> {
