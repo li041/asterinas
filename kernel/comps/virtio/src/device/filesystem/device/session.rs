@@ -19,9 +19,8 @@ use aster_fuse::{
         release::{ReleaseFlags, ReleaseIn, ReleaseKind, ReleaseOperation},
         write::{WriteIn, WriteOperation},
     },
-    FuseCompleteFn, FuseError, FuseFileHandle, FuseNodeId, FuseOperation, FuseStatus,
-    FuseStatusError, OutHeader, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID,
-    MIN_MAX_WRITE,
+    FuseCompleteFn, FuseError, FuseFileHandle, FuseNodeId, FuseOperation, OutHeader,
+    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID, MIN_MAX_WRITE,
 };
 use aster_util::mem_obj_slice::Slice;
 use ostd::{
@@ -65,14 +64,7 @@ pub struct FuseSession {
 
 impl FuseSession {
     fn wait_for_submitted_request(waiter: &FuseWaiter) -> Result<(), FuseError> {
-        match waiter.wait() {
-            FuseStatus::Complete => Ok(()),
-            FuseStatus::Error(FuseStatusError::Timeout) => Err(FuseError::Timeout),
-            FuseStatus::Error(
-                FuseStatusError::MalformedResponse | FuseStatusError::RemoteError,
-            )
-            | FuseStatus::Pending => Err(FuseError::MalformedResponse),
-        }
+        waiter.wait()
     }
 
     /// Creates a new FUSE session by performing `FUSE_INIT` negotiation with

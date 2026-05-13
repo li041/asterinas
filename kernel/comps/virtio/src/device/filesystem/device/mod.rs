@@ -24,8 +24,7 @@ use core::{
 };
 
 use aster_fuse::{
-    FuseCompleteFn, FuseError, FuseNodeId, FuseOperation, FuseStatus, FuseStatusError, FuseUnique,
-    OutHeader,
+    FuseCompleteFn, FuseError, FuseNodeId, FuseOperation, FuseStatus, FuseUnique, OutHeader,
 };
 use aster_util::{mem_obj_slice::Slice, slot_vec::SlotVec};
 use ostd::{
@@ -37,20 +36,19 @@ use ostd::{
     },
     sync::{LocalIrqDisabled, SpinLock, Waiter, Waker},
     timer::{self, Jiffies},
-    warn,
 };
 pub use session::{AttrVersion, FuseSession};
 use spin::Once;
 
 use super::{
+    DEVICE_NAME,
     config::{FileSystemFeatures, VirtioFsConfig},
     pool::FsDmaPool,
-    DEVICE_NAME,
 };
 use crate::{
     device::{
-        filesystem::pool::{FsDmaStorage, FuseDataBuf, FuseReadBuf, FuseWriteBuf},
         VirtioDeviceError,
+        filesystem::pool::{FsDmaStorage, FuseDataBuf, FuseReadBuf, FuseWriteBuf},
     },
     queue::{PopUsedError, VirtQueue},
     transport::VirtioTransport,
@@ -203,10 +201,7 @@ impl FuseRequest {
     }
 
     fn wake_if_expired(&self, now: Duration) {
-        let status = self.waiter.wake_if_expired(now);
-        if status == FuseStatus::Error(FuseStatusError::Timeout) {
-            warn!("virtiofs request timed out");
-        }
+        self.waiter.wake_if_expired(now);
     }
 }
 
@@ -236,10 +231,10 @@ impl FuseWaiter {
         }
     }
 
-    pub fn wait(&self) -> FuseStatus {
+    pub fn wait(&self) -> Result<(), FuseError> {
         let mut inner = self.inner.lock();
         if !inner.status.is_pending() {
-            return inner.status;
+            return Self::status_to_result(inner.status);
         }
 
         let (waiter, waker) = Waiter::new_pair();
@@ -265,18 +260,19 @@ impl FuseWaiter {
         );
 
         if let Ok(status) = wait_res {
-            return status;
+            return Self::status_to_result(status);
         }
 
         let mut inner = self.inner.lock();
         if !inner.status.is_pending() {
-            return inner.status;
+            return Self::status_to_result(inner.status);
         }
         inner.waker = None;
         inner.timeout_deadline = None;
         drop(inner);
 
-        self.complete(FuseStatus::Error(FuseStatusError::Timeout))
+        self.complete(FuseStatus::Timeout);
+        Err(FuseError::Timeout)
     }
 
     pub(super) fn out_bufs(&self) -> Option<&[Arc<Slice<FsDmaStorage<FromDevice>>>]> {
@@ -285,17 +281,11 @@ impl FuseWaiter {
 
     pub(super) fn check_device_output(&self) -> Result<usize, FuseError> {
         let result = self.check_device_output_result();
-        let status = match result {
-            Ok(_) => FuseStatus::Complete,
-            Err(FuseError::RemoteError(_)) => FuseStatus::Error(FuseStatusError::RemoteError),
-            Err(_) => FuseStatus::Error(FuseStatusError::MalformedResponse),
-        };
-        self.call_complete_fn(status);
-
+        self.call_complete_fn(FuseStatus::Complete);
         result
     }
 
-    fn wake_if_expired(&self, now: Duration) -> FuseStatus {
+    fn wake_if_expired(&self, now: Duration) {
         let is_expired = {
             let inner = self.inner.lock();
             inner.status.is_pending()
@@ -303,18 +293,17 @@ impl FuseWaiter {
                     .timeout_deadline
                     .is_some_and(|deadline| now >= deadline)
         };
-        if !is_expired {
-            return self.inner.lock().status;
-        }
 
-        self.complete(FuseStatus::Error(FuseStatusError::Timeout))
+        if is_expired {
+            self.complete(FuseStatus::Timeout);
+        }
     }
 
-    fn complete(&self, status: FuseStatus) -> FuseStatus {
+    fn complete(&self, status: FuseStatus) {
         let waker = {
             let mut inner = self.inner.lock();
             if !inner.status.is_pending() {
-                return inner.status;
+                return;
             }
 
             inner.status = status;
@@ -326,8 +315,6 @@ impl FuseWaiter {
         if let Some(waker) = waker {
             let _ = waker.wake_up();
         }
-
-        status
     }
 
     fn check_device_output_result(&self) -> Result<usize, FuseError> {
@@ -373,6 +360,14 @@ impl FuseWaiter {
         let complete_fn = self.inner.lock().complete_fn.take();
         if let Some(complete_fn) = complete_fn {
             complete_fn(status);
+        }
+    }
+
+    fn status_to_result(status: FuseStatus) -> Result<(), FuseError> {
+        match status {
+            FuseStatus::Complete => Ok(()),
+            FuseStatus::Timeout => Err(FuseError::Timeout),
+            FuseStatus::Pending => Err(FuseError::MalformedResponse),
         }
     }
 }

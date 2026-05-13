@@ -609,10 +609,10 @@ pub enum FuseOpcode {
 pub enum FuseStatus {
     /// The request has not completed yet.
     Pending,
-    /// The request completed successfully.
+    /// The request completed.
     Complete,
-    /// The request failed.
-    Error(FuseStatusError),
+    /// The request timed out without receiving a response.
+    Timeout,
 }
 
 impl FuseStatus {
@@ -622,21 +622,7 @@ impl FuseStatus {
     }
 }
 
-/// The error status of a submitted FUSE request.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FuseStatusError {
-    /// The request timed out without receiving a response.
-    Timeout,
-    /// The backend returned a malformed response.
-    MalformedResponse,
-    /// The backend returned a well-formed reply whose `error` field is non-zero.
-    ///
-    /// Synchronous callers should still parse the reply header afterwards to
-    /// retrieve the concrete remote errno.
-    RemoteError,
-}
-
 /// The completion function type for FUSE operations.
 ///
-/// The function receives the final [`FuseStatus`] of the FUSE operation.
+/// The function receives the completion state of the FUSE operation.
 pub type FuseCompleteFn = Box<dyn FnOnce(FuseStatus) + Send>;
