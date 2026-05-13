@@ -5,36 +5,24 @@
 //! [`FuseSession`] is mount-scoped FUSE session. It performs
 //! `FUSE_INIT` negotiation, and exposes typed request helpers.
 
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use aster_block::bio::BioSegment;
 use aster_fuse::{
-    EntryOut, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID, FuseDirEntry,
-    FuseError, FuseFileHandle, FuseNodeId, LseekOut, MIN_MAX_WRITE, OpenOut,
+    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID, FuseCompleteFn, FuseError,
+    FuseFileHandle, FuseNodeId, FuseOperation, FuseStatus, FuseStatusError, MIN_MAX_WRITE,
     ops::{
-        create::{CreateIn, CreateOperation},
-        getattr::{FuseAttrOut, GetattrFlags, GetattrIn, GetattrOperation},
+        forget::{ForgetIn, ForgetOperation},
         init::{FuseInitFlags, FuseInitFlags2, InitIn, InitOperation},
-        link::{LinkIn, LinkOperation},
-        lookup::LookupOperation,
-        lseek::{LseekIn, LseekOperation},
-        mkdir::{MkdirIn, MkdirOperation},
-        mknod::{MknodIn, MknodOperation},
-        open::{OpenIn, OpenOperation, OpendirOperation},
-        read::ReadIn,
-        readdir::ReaddirOperation,
-        readlink::ReadlinkOperation,
+        read::{ReadIn, ReadOperation},
         release::{ReleaseFlags, ReleaseIn, ReleaseKind, ReleaseOperation},
-        rmdir::RmdirOperation,
-        setattr::{SetattrIn, SetattrOperation},
-        unlink::UnlinkOperation,
-        write::WriteIn,
+        write::{WriteIn, WriteOperation},
     },
 };
 use ostd::{info, warn};
 
-use super::{super::DEVICE_NAME, FileSystemDevice};
+use super::{super::DEVICE_NAME, FileSystemDevice, FuseReadBuf, FuseWaiter, FuseWriteBuf};
+use crate::device::filesystem::pool::FuseDataBuf;
 
 /// A mount-scoped FUSE session.
 ///
@@ -67,11 +55,22 @@ pub struct FuseSession {
 }
 
 impl FuseSession {
+    fn wait_for_submitted_request(waiter: &FuseWaiter) -> Result<(), FuseError> {
+        match waiter.wait() {
+            FuseStatus::Complete | FuseStatus::Error(FuseStatusError::RemoteError) => Ok(()),
+            FuseStatus::Error(FuseStatusError::Timeout) => Err(FuseError::Timeout),
+            FuseStatus::Error(FuseStatusError::MalformedResponse) | FuseStatus::Pending => {
+                Err(FuseError::MalformedResponse)
+            }
+        }
+    }
+
     /// Creates a new FUSE session by performing `FUSE_INIT` negotiation with
     /// the daemon.
     pub fn new(device: Arc<FileSystemDevice>) -> Result<Arc<Self>, FuseError> {
         let requested_flags = Self::init_flags();
-        let init_out = device.do_fuse_op(
+        let init_out = Self::do_fuse_op_on_device(
+            &device,
             FUSE_ROOT_ID,
             InitOperation::new(InitIn::new(
                 FUSE_KERNEL_VERSION,
@@ -172,93 +171,71 @@ impl FuseSession {
             | FuseInitFlags::PARALLEL_DIROPS
             | FuseInitFlags::INIT_EXT
     }
+
+    fn do_fuse_op_on_device<Op: FuseOperation>(
+        device: &Arc<FileSystemDevice>,
+        nodeid: FuseNodeId,
+        mut operation: Op,
+    ) -> Result<Op::Output, FuseError> {
+        let waiter = device.submit_fuse_op(nodeid, &mut operation, None, None)?;
+        Self::wait_for_submitted_request(&waiter)?;
+        waiter.read_reply(operation)
+    }
+
+    /// Sends one FUSE operation and waits for the typed reply.
+    pub fn do_fuse_op<Op: FuseOperation>(
+        &self,
+        nodeid: FuseNodeId,
+        operation: Op,
+    ) -> Result<Op::Output, FuseError> {
+        Self::do_fuse_op_on_device(&self.device, nodeid, operation)
+    }
+
+    /// Allocates a buffer for `FUSE_READ` data.
+    pub fn alloc_read_buf(&self, size: usize) -> Result<FuseReadBuf, FuseError> {
+        self.device
+            .from_device_pool
+            .alloc_fs_buf(size)
+            .map_err(FuseError::ResourceAlloc)
+    }
+
+    /// Allocates a buffer for `FUSE_WRITE` data.
+    pub fn alloc_write_buf(&self, size: usize) -> Result<FuseWriteBuf, FuseError> {
+        self.device
+            .to_device_pool
+            .alloc_fs_buf(size)
+            .map_err(FuseError::ResourceAlloc)
+    }
 }
 
 impl FuseSession {
-    pub fn lookup(&self, parent_nodeid: FuseNodeId, name: &str) -> Result<EntryOut, FuseError> {
-        self.device
-            .do_fuse_op(parent_nodeid, LookupOperation::new(name))
-    }
-
-    /// Releases `nlookup` accumulated lookup references for node sitting at server-side.
+    /// Sends a `FUSE_FORGET` request on the high-priority queue.
+    ///
+    /// `FUSE_FORGET` is a no-reply request. The backend must not send a
+    /// response, so this method only submits the request and never waits for
+    /// completion. Local prepare or enqueue failures are logged and otherwise
+    /// ignored because callers cannot observe a protocol-level error for
+    /// `FUSE_FORGET`.
     pub fn forget(&self, nodeid: FuseNodeId, nlookup: u64) {
-        self.device.forget(nodeid, nlookup)
-    }
+        if nodeid == FUSE_ROOT_ID || nlookup == 0 {
+            return;
+        }
 
-    pub fn getattr(
-        &self,
-        nodeid: FuseNodeId,
-        getattr_flags: GetattrFlags,
-        fh: FuseFileHandle,
-    ) -> Result<FuseAttrOut, FuseError> {
-        self.device.do_fuse_op(
-            nodeid,
-            GetattrOperation::new(GetattrIn::new(getattr_flags, fh)),
-        )
-    }
-
-    /// Sets attributes according to the fields selected in [`SetattrIn`].
-    pub fn setattr(
-        &self,
-        nodeid: FuseNodeId,
-        setattr_in: SetattrIn,
-    ) -> Result<FuseAttrOut, FuseError> {
-        self.device
-            .do_fuse_op(nodeid, SetattrOperation::new(setattr_in))
-    }
-
-    pub fn readlink(&self, nodeid: FuseNodeId) -> Result<String, FuseError> {
-        self.device.do_fuse_op(nodeid, ReadlinkOperation)
-    }
-
-    pub fn mknod(
-        &self,
-        parent_nodeid: FuseNodeId,
-        name: &str,
-        mode: u32,
-        rdev: u32,
-    ) -> Result<EntryOut, FuseError> {
-        self.device.do_fuse_op(
-            parent_nodeid,
-            MknodOperation::new(MknodIn::new(mode, rdev), name),
-        )
-    }
-
-    pub fn mkdir(
-        &self,
-        parent_nodeid: FuseNodeId,
-        name: &str,
-        mode: u32,
-    ) -> Result<EntryOut, FuseError> {
-        self.device
-            .do_fuse_op(parent_nodeid, MkdirOperation::new(MkdirIn::new(mode), name))
-    }
-
-    pub fn unlink(&self, parent_nodeid: FuseNodeId, name: &str) -> Result<(), FuseError> {
-        self.device
-            .do_fuse_op(parent_nodeid, UnlinkOperation::new(name))
-    }
-
-    pub fn rmdir(&self, parent_nodeid: FuseNodeId, name: &str) -> Result<(), FuseError> {
-        self.device
-            .do_fuse_op(parent_nodeid, RmdirOperation::new(name))
-    }
-
-    pub fn link(
-        &self,
-        old_nodeid: FuseNodeId,
-        new_parent_nodeid: FuseNodeId,
-        new_name: &str,
-    ) -> Result<EntryOut, FuseError> {
-        self.device.do_fuse_op(
-            new_parent_nodeid,
-            LinkOperation::new(LinkIn::new(old_nodeid), new_name),
-        )
-    }
-
-    pub fn open(&self, nodeid: FuseNodeId, flags: u32) -> Result<OpenOut, FuseError> {
-        self.device
-            .do_fuse_op(nodeid, OpenOperation::new(OpenIn::new(flags)))
+        let mut operation = ForgetOperation::new(ForgetIn::new(nlookup));
+        let request = match self
+            .device
+            .prepare_request(nodeid, &mut operation, None, None)
+        {
+            Ok(request) => Arc::new(request),
+            Err(err) => {
+                warn!(
+                    "virtiofs forget failed to prepare inode {:?} with nlookup {}: {:?}",
+                    nodeid, nlookup, err
+                );
+                return;
+            }
+        };
+        self.device.submit(&self.device.hiprio_queue, request);
     }
 
     pub fn read(
@@ -268,29 +245,81 @@ impl FuseSession {
         offset: u64,
         size: u32,
         flags: u32,
-        bio_segment: BioSegment,
+        data_buf: FuseReadBuf,
     ) -> Result<usize, FuseError> {
-        let read_len = self.device.read(
+        let read_in = ReadIn::new(fh, offset, size, flags);
+        let len = read_in.size() as usize;
+        let mut operation = ReadOperation::new(read_in);
+        let waiter = self.device.submit_fuse_op(
             nodeid,
-            ReadIn::new(fh, offset, size, flags),
-            bio_segment.clone(),
+            &mut operation,
+            Some(FuseDataBuf::Read(data_buf)),
+            None,
         )?;
-        bio_segment.inner_dma_slice().sync_from_device().unwrap();
+        Self::wait_for_submitted_request(&waiter)?;
+
+        let read_len = waiter.read_reply(operation)?;
+        if read_len > len {
+            return Err(FuseError::MalformedResponse);
+        }
 
         Ok(read_len)
+    }
+
+    pub fn read_async(
+        &self,
+        nodeid: FuseNodeId,
+        read_in: ReadIn,
+        data_buf: FuseReadBuf,
+        complete_fn: Option<FuseCompleteFn>,
+    ) -> Result<FuseWaiter, FuseError> {
+        let mut operation = ReadOperation::new(read_in);
+        self.device.submit_fuse_op(
+            nodeid,
+            &mut operation,
+            Some(FuseDataBuf::Read(data_buf)),
+            complete_fn,
+        )
     }
 
     pub fn write(
         &self,
         nodeid: FuseNodeId,
         write_in: WriteIn,
-        bio_segment: BioSegment,
+        data_buf: FuseWriteBuf,
     ) -> Result<usize, FuseError> {
-        bio_segment.inner_dma_slice().sync_to_device().unwrap();
+        let write_size = write_in.size() as usize;
+        let mut operation = WriteOperation::new(write_in);
+        let waiter = self.device.submit_fuse_op(
+            nodeid,
+            &mut operation,
+            Some(FuseDataBuf::Write(data_buf)),
+            None,
+        )?;
+        Self::wait_for_submitted_request(&waiter)?;
 
-        let written_len = self.device.write(nodeid, write_in, bio_segment)?;
+        let write_out = waiter.read_reply(operation)?;
+        if write_out.size() > write_size {
+            return Err(FuseError::MalformedResponse);
+        }
 
-        Ok(written_len)
+        Ok(write_out.size())
+    }
+
+    pub fn write_async(
+        &self,
+        nodeid: FuseNodeId,
+        write_in: WriteIn,
+        data_buf: FuseWriteBuf,
+        complete_fn: Option<FuseCompleteFn>,
+    ) -> Result<FuseWaiter, FuseError> {
+        let mut operation = WriteOperation::new(write_in);
+        self.device.submit_fuse_op(
+            nodeid,
+            &mut operation,
+            Some(FuseDataBuf::Write(data_buf)),
+            complete_fn,
+        )
     }
 
     /// Releases the file or directory handle `fh` on `nodeid`.
@@ -304,59 +333,12 @@ impl FuseSession {
         release_flags: ReleaseFlags,
         kind: ReleaseKind,
     ) {
-        if let Err(err) = self.device.do_fuse_op(
+        if let Err(err) = self.do_fuse_op(
             nodeid,
             ReleaseOperation::new(ReleaseIn::new(fh, flags, release_flags), kind),
         ) {
             warn!("virtiofs release failed for inode {:?}: {:?}", nodeid, err);
         }
-    }
-
-    pub fn opendir(&self, nodeid: FuseNodeId) -> Result<OpenOut, FuseError> {
-        self.device
-            .do_fuse_op(nodeid, OpendirOperation::new(OpenIn::new(0)))
-    }
-
-    pub fn readdir(
-        &self,
-        nodeid: FuseNodeId,
-        fh: FuseFileHandle,
-        offset: u64,
-        size: u32,
-        flags: u32,
-    ) -> Result<Vec<FuseDirEntry>, FuseError> {
-        self.device.do_fuse_op(
-            nodeid,
-            ReaddirOperation::new(ReadIn::new(fh, offset, size, flags), size as usize),
-        )
-    }
-
-    pub fn create(
-        &self,
-        parent_nodeid: FuseNodeId,
-        name: &str,
-        mode: u32,
-    ) -> Result<(EntryOut, OpenOut), FuseError> {
-        const O_RDWR: u32 = 2;
-
-        // TODO: Pass the caller's open flags once the VFS create path carries them.
-        self.device.do_fuse_op(
-            parent_nodeid,
-            CreateOperation::new(CreateIn::new(O_RDWR, mode), name),
-        )
-    }
-
-    pub fn lseek(
-        &self,
-        nodeid: FuseNodeId,
-        fh: FuseFileHandle,
-        offset: i64,
-        whence: u32,
-    ) -> Result<LseekOut, FuseError> {
-        self.device.do_fuse_op(
-            nodeid,
-            LseekOperation::new(LseekIn::new(fh, offset, whence)),
-        )
     }
 }
 

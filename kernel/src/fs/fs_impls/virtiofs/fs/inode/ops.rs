@@ -4,13 +4,20 @@
 
 use alloc::sync::Arc;
 
-use aster_block::{
-    BLOCK_SIZE,
-    bio::{BioDirection, BioSegment},
-};
 use aster_fuse::{
-    EntryOut, FuseAttrOut, FuseDirEntry, FuseFileHandle, FuseOpenFlags, GetattrFlags, ReleaseFlags,
-    ReleaseKind, SetattrIn, WriteFlags, WriteIn,
+    EntryOut, FuseAttrOut, FuseCompleteFn, FuseDirEntry, FuseFileHandle, FuseOpenFlags,
+    GetattrFlags, ReadIn, ReleaseFlags, ReleaseKind, SetattrIn, WriteFlags, WriteIn,
+    ops::{
+        getattr::{GetattrIn, GetattrOperation},
+        lookup::LookupOperation,
+        open::{OpenIn, OpenOperation, OpendirOperation},
+        readdir::ReaddirOperation,
+        setattr::SetattrOperation,
+    },
+};
+use aster_virtio::device::filesystem::{
+    device::FuseWaiter,
+    pool::{FuseReadBuf, FuseWriteBuf},
 };
 use ostd::mm::{VmIo, VmReader, VmWriter, io::util::HasVmReaderWriter};
 
@@ -73,19 +80,23 @@ impl VirtioFsInode {
         let end = file_size.min(offset.saturating_add(writer.avail()));
         let read_len = end - start;
 
-        let bio_segment = BioSegment::alloc(
-            (read_len as usize).div_ceil(BLOCK_SIZE),
-            BioDirection::FromDevice,
-        );
+        if read_len == 0 {
+            return Ok(0);
+        }
+
+        let fs = self.fs_ref();
+        let data_buf = fs.session.alloc_read_buf(read_len)?;
+
         let copied = self.fs_ref().session.read(
             self.nodeid(),
             fh,
             start as u64,
             read_len as u32,
             flags,
-            bio_segment.clone(),
+            data_buf.clone(),
         )?;
-        let mut segment_reader = bio_segment.reader()?;
+
+        let mut segment_reader = data_buf.reader()?;
         segment_reader.limit(copied);
         segment_reader
             .read_fallible(writer)
@@ -101,7 +112,9 @@ impl VirtioFsInode {
     ) -> Result<usize> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDONLY as u32;
-        let open_out = fs.session.open(self.nodeid(), flags)?;
+        let open_out = fs
+            .session
+            .do_fuse_op(self.nodeid(), OpenOperation::new(OpenIn::new(flags)))?;
         let ret = self.direct_read_at(offset, writer, open_out.fh(), flags);
         fs.session.release(
             self.nodeid(),
@@ -113,36 +126,45 @@ impl VirtioFsInode {
         ret
     }
 
-    pub(in super::super) fn read_bio_with_transient_handle(
+    pub(in super::super) fn read_buf_with_transient_handle(
         &self,
         offset: usize,
         size: u32,
-        bio_segment: BioSegment,
-    ) -> Result<usize> {
+        data_buf: FuseReadBuf,
+        complete_fn: FuseCompleteFn,
+    ) -> Result<FuseWaiter> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDONLY as u32;
-        let open_out = fs.session.open(self.nodeid(), flags)?;
-        let ret = fs
+        let open_out = fs
             .session
-            .read(
-                self.nodeid(),
-                open_out.fh(),
-                offset as u64,
-                size,
-                flags,
-                bio_segment,
-            )
-            .map_err(Error::from);
+            .do_fuse_op(self.nodeid(), OpenOperation::new(OpenIn::new(flags)))?;
+        let fh = open_out.fh();
+        let nodeid = self.nodeid();
+        let session = fs.session.clone();
 
-        fs.session.release(
-            self.nodeid(),
-            open_out.fh(),
-            flags,
-            ReleaseFlags::empty(),
-            ReleaseKind::File,
-        );
+        let release_fn: FuseCompleteFn = Box::new(move |status| {
+            complete_fn(status);
+            work_queue::submit_work_func(
+                move || {
+                    session.release(nodeid, fh, flags, ReleaseFlags::empty(), ReleaseKind::File);
+                },
+                WorkPriority::Normal,
+            );
+        });
 
-        ret
+        match fs.session.read_async(
+            nodeid,
+            ReadIn::new(fh, offset as u64, size, flags),
+            data_buf,
+            Some(release_fn),
+        ) {
+            Ok(waiter) => Ok(waiter),
+            Err(err) => {
+                fs.session
+                    .release(nodeid, fh, flags, ReleaseFlags::empty(), ReleaseKind::File);
+                Err(err.into())
+            }
+        }
     }
 
     pub(in super::super) fn cached_write_at(
@@ -156,7 +178,7 @@ impl VirtioFsInode {
             return self.direct_write_at(offset, reader, fh, flags);
         };
 
-        let written = self.write_with_bio_segments(offset, reader, fh, flags)?;
+        let written = self.write_with_fuse_buffers(offset, reader, fh, flags)?;
 
         let new_size = offset
             .checked_add(written)
@@ -184,7 +206,7 @@ impl VirtioFsInode {
             page_cache.invalidate_range(offset..write_end)?;
         };
 
-        let written = self.write_with_bio_segments(offset, reader, fh, flags)?;
+        let written = self.write_with_fuse_buffers(offset, reader, fh, flags)?;
 
         let new_size = offset
             .checked_add(written)
@@ -203,7 +225,9 @@ impl VirtioFsInode {
     ) -> Result<usize> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDWR as u32;
-        let open_out = fs.session.open(self.nodeid(), flags)?;
+        let open_out = fs
+            .session
+            .do_fuse_op(self.nodeid(), OpenOperation::new(OpenIn::new(flags)))?;
         let ret = self.direct_write_at(offset, reader, open_out.fh(), flags);
         fs.session.release(
             self.nodeid(),
@@ -215,43 +239,49 @@ impl VirtioFsInode {
         ret
     }
 
-    pub(in super::super) fn write_bio_with_transient_handle(
+    pub(in super::super) fn write_buf_with_transient_handle(
         &self,
         offset: usize,
         size: usize,
         write_flags: WriteFlags,
-        bio_segment: BioSegment,
-    ) -> Result<usize> {
+        data_buf: FuseWriteBuf,
+        complete_fn: FuseCompleteFn,
+    ) -> Result<FuseWaiter> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDWR as u32;
-        let open_out = fs.session.open(self.nodeid(), flags)?;
-        let ret = fs
+        let open_out = fs
             .session
-            .write(
-                self.nodeid(),
-                WriteIn::new(
-                    open_out.fh(),
-                    offset as u64,
-                    size as u32,
-                    flags,
-                    write_flags,
-                ),
-                bio_segment,
-            )
-            .map_err(Error::from);
+            .do_fuse_op(self.nodeid(), OpenOperation::new(OpenIn::new(flags)))?;
+        let fh = open_out.fh();
+        let nodeid = self.nodeid();
+        let session = fs.session.clone();
 
-        fs.session.release(
-            self.nodeid(),
-            open_out.fh(),
-            flags,
-            ReleaseFlags::empty(),
-            ReleaseKind::File,
-        );
+        let release_fn: FuseCompleteFn = Box::new(move |status| {
+            complete_fn(status);
+            work_queue::submit_work_func(
+                move || {
+                    session.release(nodeid, fh, flags, ReleaseFlags::empty(), ReleaseKind::File);
+                },
+                WorkPriority::Normal,
+            );
+        });
 
-        ret
+        match fs.session.write_async(
+            nodeid,
+            WriteIn::new(fh, offset as u64, size as u32, flags, write_flags),
+            data_buf,
+            Some(release_fn),
+        ) {
+            Ok(waiter) => Ok(waiter),
+            Err(err) => {
+                fs.session
+                    .release(nodeid, fh, flags, ReleaseFlags::empty(), ReleaseKind::File);
+                Err(err.into())
+            }
+        }
     }
 
-    fn write_with_bio_segments(
+    fn write_with_fuse_buffers(
         &self,
         offset: usize,
         reader: &mut VmReader,
@@ -264,10 +294,9 @@ impl VirtioFsInode {
             let write_size = reader
                 .remain()
                 .min(self.fs_ref().session.max_write() as usize);
-            let bio_segment =
-                BioSegment::alloc(write_size.div_ceil(BLOCK_SIZE), BioDirection::ToDevice);
+            let data_buf = self.fs_ref().session.alloc_write_buf(write_size)?;
 
-            let mut segment_writer = bio_segment.writer().unwrap();
+            let mut segment_writer = data_buf.writer().unwrap();
             let mut request_reader = reader.clone();
             request_reader.limit(write_size);
             segment_writer.write_fallible(&mut request_reader)?;
@@ -284,7 +313,7 @@ impl VirtioFsInode {
                     flags,
                     WriteFlags::empty(),
                 ),
-                bio_segment,
+                data_buf,
             )?;
 
             if written > write_size {
@@ -318,7 +347,10 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         match self.type_ {
             InodeType::File => {
-                let open_out = fs.session.open(self.nodeid(), access_mode as u32)?;
+                let open_out = fs.session.do_fuse_op(
+                    self.nodeid(),
+                    OpenOperation::new(OpenIn::new(access_mode as u32)),
+                )?;
                 let cache_policy = if self.page_cache.is_some()
                     && !open_out
                         .open_flags()
@@ -355,7 +387,9 @@ impl VirtioFsInode {
                 )))
             }
             InodeType::Dir => {
-                let open_out = fs.session.opendir(self.nodeid())?;
+                let open_out = fs
+                    .session
+                    .do_fuse_op(self.nodeid(), OpendirOperation::new(OpenIn::new(0)))?;
                 let open_handle = VirtioFsOpenHandle::new(
                     open_out.fh(),
                     self.nodeid(),
@@ -403,12 +437,12 @@ impl VirtioFsInode {
         visitor: &mut dyn DirentVisitor,
     ) -> Result<usize> {
         let fs = self.fs_ref();
-        let entries: Vec<FuseDirEntry> = fs.session.readdir(
+        let entries: Vec<FuseDirEntry> = fs.session.do_fuse_op(
             self.nodeid(),
-            fh,
-            offset as u64,
-            FUSE_READDIR_BUF_SIZE,
-            flags,
+            ReaddirOperation::new(
+                ReadIn::new(fh, offset as u64, FUSE_READDIR_BUF_SIZE, flags),
+                FUSE_READDIR_BUF_SIZE as usize,
+            ),
         )?;
 
         let offset_read = {
@@ -440,7 +474,9 @@ impl VirtioFsInode {
         let fs = self.fs_ref();
         let request_attr_version = fs.session.snapshot_attr_version();
         let valid = setattr_in.valid();
-        let attr_out = fs.session.setattr(self.nodeid(), setattr_in)?;
+        let attr_out = fs
+            .session
+            .do_fuse_op(self.nodeid(), SetattrOperation::new(setattr_in))?;
 
         self.commit_metadata_changing_reply(
             attr_out.attr(),
@@ -480,7 +516,9 @@ impl VirtioFsInode {
         let old_nodeid = self.nodeid();
         let fs = self.fs_ref();
         let request_attr_version = fs.session.snapshot_attr_version();
-        let entry_out = fs.session.lookup(parent_nodeid, name)?;
+        let entry_out = fs
+            .session
+            .do_fuse_op(parent_nodeid, LookupOperation::new(name))?;
 
         if entry_out.nodeid() != old_nodeid {
             fs.session.forget(entry_out.nodeid(), 1);
@@ -512,9 +550,10 @@ impl VirtioFsInode {
 
         let fs = self.fs_ref();
         let request_attr_version = fs.session.snapshot_attr_version();
-        let attr_out = fs
-            .session
-            .getattr(self.nodeid(), GetattrFlags::GETATTR_FH, fh)?;
+        let attr_out = fs.session.do_fuse_op(
+            self.nodeid(),
+            GetattrOperation::new(GetattrIn::new(GetattrFlags::GETATTR_FH, fh)),
+        )?;
 
         self.commit_fresh_metadata_reply(
             attr_out.attr(),

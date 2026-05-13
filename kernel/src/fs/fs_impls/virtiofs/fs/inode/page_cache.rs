@@ -2,20 +2,29 @@
 
 //! Page cache backend implementation for `VirtioFsInode`.
 
-use aster_block::bio::{BioCompleteFn, BioSegment, BioStatus, BioWaiter};
-use aster_fuse::{WriteFlags, WriteIn};
-use ostd::mm::PAGE_SIZE;
+use alloc::{boxed::Box, sync::Arc};
+use core::{any::Any, ops::Deref};
+
+use aster_fuse::{FuseCompleteFn, FuseStatus, ReadIn, WriteFlags, WriteIn};
+use aster_util::mem_obj_slice::Slice;
+use aster_virtio::device::filesystem::{device::FuseWaiter, pool::FsDmaStorage};
+use ostd::mm::{PAGE_SIZE, Segment, io::util::HasVmReaderWriter};
 
 use super::VirtioFsInode;
-use crate::{prelude::*, vm::page_cache::PageCacheBackend};
+use crate::{
+    prelude::*,
+    vm::page_cache::{
+        CachePageExt, PageCacheBackend, PageCacheIoWaiter,
+        cache_page::{self, LockedCachePage},
+    },
+};
 
 impl PageCacheBackend for VirtioFsInode {
-    fn submit_read_bio(
+    fn read_page_async(
         &self,
         idx: usize,
-        bio_segment: BioSegment,
-        complete_fn: Option<BioCompleteFn>,
-    ) -> Result<BioWaiter> {
+        locked_page: LockedCachePage,
+    ) -> Result<Box<dyn PageCacheIoWaiter>> {
         let offset = idx.checked_mul(PAGE_SIZE).ok_or_else(|| {
             Error::with_message(Errno::EOVERFLOW, "virtiofs page offset overflow")
         })?;
@@ -24,89 +33,152 @@ impl PageCacheBackend for VirtioFsInode {
         }
 
         let size = (self.size() - offset).min(PAGE_SIZE).min(u32::MAX as usize) as u32;
+        let data_buf = Arc::new(Slice::new(
+            FsDmaStorage::new_from_segment(Segment::from(locked_page.deref().clone()).into()),
+            0..size as usize,
+        ));
 
-        let ret: Result<()> = (|| {
-            if let Some(open_handle) = self.open_handles.find_readable_handle() {
-                let fs = self.fs_ref();
-                fs.session.read(
-                    self.nodeid(),
-                    open_handle.fh(),
-                    offset as u64,
-                    size,
-                    open_handle.file_flags(),
-                    bio_segment,
-                )?;
-            } else {
-                self.read_bio_with_transient_handle(offset, size, bio_segment)?;
+        let complete_fn: FuseCompleteFn = Box::new(move |status| {
+            if status == FuseStatus::Complete {
+                locked_page.set_up_to_date();
             }
-            Ok(())
-        })();
+            // The page lock is released when `locked_page` is dropped here.
+        });
 
-        if let Some(complete_fn) = complete_fn {
-            let bio_status = match ret {
-                Ok(()) => BioStatus::Complete,
-                Err(_) => BioStatus::IoError,
-            };
-            complete_fn(bio_status);
+        if let Some(open_handle) = self.open_handles.find_readable_handle() {
+            let fs = self.fs_ref();
+            let read_in = ReadIn::new(
+                open_handle.fh(),
+                offset as u64,
+                size,
+                open_handle.file_flags(),
+            );
+            let waiter =
+                fs.session
+                    .read_async(self.nodeid(), read_in, data_buf, Some(complete_fn))?;
+            return Ok(Box::new(waiter));
         }
 
-        Ok(BioWaiter::new())
+        let waiter = self.read_buf_with_transient_handle(offset, size, data_buf, complete_fn)?;
+        Ok(Box::new(waiter))
     }
 
-    fn submit_write_bio(
+    fn write_page_async(
         &self,
         idx: usize,
-        bio_segment: BioSegment,
-        complete_fn: Option<BioCompleteFn>,
-    ) -> Result<BioWaiter> {
+        locked_page: LockedCachePage,
+    ) -> Result<Box<dyn PageCacheIoWaiter>> {
         let offset = idx.checked_mul(PAGE_SIZE).ok_or_else(|| {
             Error::with_message(Errno::EOVERFLOW, "virtiofs page offset overflow")
         })?;
+
+        locked_page.wait_until_finish_writing_back();
+
         let file_size = self.size();
         if offset >= file_size {
-            return Ok(BioWaiter::new());
+            locked_page.set_writing_back();
+            locked_page.set_up_to_date();
+            let page = locked_page.unlock();
+            cache_page::clear_writing_back(&page);
+            return Ok(Box::new(FuseWaiter::complete()));
         }
 
         let size = (file_size - offset).min(PAGE_SIZE);
+        let fs = self.fs_ref();
+        let data_buf = fs.session.alloc_write_buf(size)?;
+        let mut page_reader = locked_page.reader();
+        page_reader.limit(size);
+        data_buf
+            .writer()
+            .unwrap()
+            .write_fallible(&mut page_reader.to_fallible())?;
 
-        let ret: Result<()> = (|| {
-            if let Some(open_handle) = self.open_handles.find_writable_handle() {
-                let fs = self.fs_ref();
-                fs.session.write(
-                    self.nodeid(),
-                    WriteIn::new(
-                        open_handle.fh(),
-                        offset as u64,
-                        size as u32,
-                        open_handle.file_flags(),
-                        WriteFlags::empty(),
-                    ),
-                    bio_segment,
-                )?;
-            } else {
-                self.write_bio_with_transient_handle(
-                    offset,
-                    size,
+        locked_page.set_writing_back();
+        locked_page.set_up_to_date();
+
+        let page = locked_page.unlock();
+
+        if let Some(open_handle) = self.open_handles.find_writable_handle() {
+            let submit_page = page.clone();
+            let complete_fn: FuseCompleteFn = Box::new(move |status| {
+                cache_page::clear_writing_back(&submit_page);
+                if status != FuseStatus::Complete {
+                    ostd::error!(
+                        "virtiofs writeback failed for page index {idx} with status {status:?}; data may be lost"
+                    );
+                }
+            });
+
+            match fs.session.write_async(
+                self.nodeid(),
+                WriteIn::new(
+                    open_handle.fh(),
+                    offset as u64,
+                    size as u32,
+                    open_handle.file_flags(),
                     WriteFlags::empty(),
-                    bio_segment,
-                )?;
+                ),
+                data_buf,
+                Some(complete_fn),
+            ) {
+                Ok(waiter) => return Ok(Box::new(waiter)),
+                Err(err) => {
+                    let locked_page = page.lock();
+                    locked_page.set_dirty();
+                    cache_page::clear_writing_back(&locked_page);
+                    return Err(err.into());
+                }
             }
-            Ok(())
-        })();
-
-        if let Some(complete_fn) = complete_fn {
-            let bio_status = match ret {
-                Ok(()) => BioStatus::Complete,
-                Err(_) => BioStatus::IoError,
-            };
-            complete_fn(bio_status);
         }
 
-        Ok(BioWaiter::new())
+        let submit_page = page.clone();
+        let complete_fn: FuseCompleteFn = Box::new(move |status| {
+            cache_page::clear_writing_back(&submit_page);
+            if status != FuseStatus::Complete {
+                ostd::error!(
+                    "virtiofs writeback failed for page index {idx} with status {status:?}; data may be lost"
+                );
+            }
+        });
+        match self.write_buf_with_transient_handle(
+            offset,
+            size,
+            WriteFlags::empty(),
+            data_buf,
+            complete_fn,
+        ) {
+            Ok(waiter) => Ok(Box::new(waiter)),
+            Err(err) => {
+                let locked_page = page.lock();
+                locked_page.set_dirty();
+                cache_page::clear_writing_back(&locked_page);
+                Err(err)
+            }
+        }
     }
 
     fn npages(&self) -> usize {
         self.size().div_ceil(PAGE_SIZE)
+    }
+}
+
+impl PageCacheIoWaiter for FuseWaiter {
+    fn wait(&self) -> Result<()> {
+        if FuseWaiter::wait(self) != FuseStatus::Complete {
+            return_errno!(Errno::EIO);
+        }
+
+        Ok(())
+    }
+
+    fn concat(&mut self, other: Box<dyn PageCacheIoWaiter>) -> Result<()> {
+        let other: Box<dyn Any + Send + Sync> = other;
+        let Ok(other) = other.downcast::<Self>() else {
+            return_errno_with_message!(Errno::EINVAL, "cannot concatenate different waiter types");
+        };
+
+        FuseWaiter::concat(self, *other);
+        Ok(())
     }
 }
 
