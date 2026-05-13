@@ -113,7 +113,7 @@ impl FileSystemDevice {
             .map(|arc| arc.as_ref())
             .collect::<Vec<&_>>();
 
-        let token = match request.wait_state.out_bufs.as_ref() {
+        let token = match request.waiter.out_bufs.as_ref() {
             Some(out_bufs) => {
                 let output_bufs = out_bufs.iter().map(|arc| arc.as_ref()).collect::<Vec<&_>>();
                 queue.add_dma_bufs(&input_bufs, &output_bufs).unwrap()

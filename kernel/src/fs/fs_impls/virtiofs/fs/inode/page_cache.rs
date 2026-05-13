@@ -3,19 +3,26 @@
 //! Page cache backend implementation for `VirtioFsInode`.
 
 use alloc::{boxed::Box, sync::Arc};
-use core::{any::Any, ops::Deref};
+use core::ops::Deref;
 
-use aster_fuse::{FuseCompleteFn, FuseStatus, ReadIn, WriteFlags, WriteIn};
+use aster_fuse::{FuseCompleteFn, ReadIn, WriteFlags, WriteIn};
 use aster_util::mem_obj_slice::Slice;
-use aster_virtio::device::filesystem::{device::FuseWaiter, pool::FsDmaStorage};
-use ostd::mm::{PAGE_SIZE, Segment, io::util::HasVmReaderWriter};
+use aster_virtio::device::filesystem::{
+    device::{FuseSession, FuseWaiter},
+    pool::FsDmaStorage,
+};
+use io_util::{IoBatch, IoCompletion, IoError};
+use ostd::{
+    mm::{io::util::HasVmReaderWriter, Segment, PAGE_SIZE},
+    sync::{LocalIrqDisabled, SpinLock},
+};
 
 use super::VirtioFsInode;
 use crate::{
     prelude::*,
     vm::page_cache::{
-        CachePageExt, PageCacheBackend, PageCacheIoWaiter,
-        cache_page::{self, LockedCachePage},
+        cache_page::{self, CachePage, LockedCachePage},
+        CachePageExt, PageCacheBackend,
     },
 };
 
@@ -24,7 +31,8 @@ impl PageCacheBackend for VirtioFsInode {
         &self,
         idx: usize,
         locked_page: LockedCachePage,
-    ) -> Result<Box<dyn PageCacheIoWaiter>> {
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
         let offset = idx.checked_mul(PAGE_SIZE).ok_or_else(|| {
             Error::with_message(Errno::EOVERFLOW, "virtiofs page offset overflow")
         })?;
@@ -38,36 +46,41 @@ impl PageCacheBackend for VirtioFsInode {
             0..size as usize,
         ));
 
-        let complete_fn: FuseCompleteFn = Box::new(move |status| {
-            if status == FuseStatus::Complete {
-                locked_page.set_up_to_date();
-            }
-            // The page lock is released when `locked_page` is dropped here.
-        });
-
         if let Some(open_handle) = self.open_handles.find_readable_handle() {
             let fs = self.fs_ref();
+            let session = fs.session.clone();
             let read_in = ReadIn::new(
                 open_handle.fh(),
                 offset as u64,
                 size,
                 open_handle.file_flags(),
             );
-            let waiter =
-                fs.session
-                    .read_async(self.nodeid(), read_in, data_buf, Some(complete_fn))?;
-            return Ok(Box::new(waiter));
+            let waiter = session.read_async(self.nodeid(), read_in, data_buf, None)?;
+            io_batch.push(Arc::new(FusePageReadCompletion::new(
+                session,
+                waiter,
+                locked_page,
+            )));
+            return Ok(());
         }
 
+        let complete_fn: FuseCompleteFn = Box::new(|_| {});
+        let session = self.fs_ref().session.clone();
         let waiter = self.read_buf_with_transient_handle(offset, size, data_buf, complete_fn)?;
-        Ok(Box::new(waiter))
+        io_batch.push(Arc::new(FusePageReadCompletion::new(
+            session,
+            waiter,
+            locked_page,
+        )));
+        Ok(())
     }
 
     fn write_page_async(
         &self,
         idx: usize,
         locked_page: LockedCachePage,
-    ) -> Result<Box<dyn PageCacheIoWaiter>> {
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
         let offset = idx.checked_mul(PAGE_SIZE).ok_or_else(|| {
             Error::with_message(Errno::EOVERFLOW, "virtiofs page offset overflow")
         })?;
@@ -80,7 +93,7 @@ impl PageCacheBackend for VirtioFsInode {
             locked_page.set_up_to_date();
             let page = locked_page.unlock();
             cache_page::clear_writing_back(&page);
-            return Ok(Box::new(FuseWaiter::complete()));
+            return Ok(());
         }
 
         let size = (file_size - offset).min(PAGE_SIZE);
@@ -99,16 +112,7 @@ impl PageCacheBackend for VirtioFsInode {
         let page = locked_page.unlock();
 
         if let Some(open_handle) = self.open_handles.find_writable_handle() {
-            let submit_page = page.clone();
-            let complete_fn: FuseCompleteFn = Box::new(move |status| {
-                cache_page::clear_writing_back(&submit_page);
-                if status != FuseStatus::Complete {
-                    ostd::error!(
-                        "virtiofs writeback failed for page index {idx} with status {status:?}; data may be lost"
-                    );
-                }
-            });
-
+            let session = fs.session.clone();
             match fs.session.write_async(
                 self.nodeid(),
                 WriteIn::new(
@@ -119,9 +123,14 @@ impl PageCacheBackend for VirtioFsInode {
                     WriteFlags::empty(),
                 ),
                 data_buf,
-                Some(complete_fn),
+                None,
             ) {
-                Ok(waiter) => return Ok(Box::new(waiter)),
+                Ok(waiter) => {
+                    io_batch.push(Arc::new(FusePageWriteCompletion::new(
+                        session, waiter, page, idx,
+                    )));
+                    return Ok(());
+                }
                 Err(err) => {
                     let locked_page = page.lock();
                     locked_page.set_dirty();
@@ -131,15 +140,8 @@ impl PageCacheBackend for VirtioFsInode {
             }
         }
 
-        let submit_page = page.clone();
-        let complete_fn: FuseCompleteFn = Box::new(move |status| {
-            cache_page::clear_writing_back(&submit_page);
-            if status != FuseStatus::Complete {
-                ostd::error!(
-                    "virtiofs writeback failed for page index {idx} with status {status:?}; data may be lost"
-                );
-            }
-        });
+        let complete_fn: FuseCompleteFn = Box::new(|_| {});
+        let session = self.fs_ref().session.clone();
         match self.write_buf_with_transient_handle(
             offset,
             size,
@@ -147,7 +149,12 @@ impl PageCacheBackend for VirtioFsInode {
             data_buf,
             complete_fn,
         ) {
-            Ok(waiter) => Ok(Box::new(waiter)),
+            Ok(waiter) => {
+                io_batch.push(Arc::new(FusePageWriteCompletion::new(
+                    session, waiter, page, idx,
+                )));
+                Ok(())
+            }
             Err(err) => {
                 let locked_page = page.lock();
                 locked_page.set_dirty();
@@ -162,23 +169,82 @@ impl PageCacheBackend for VirtioFsInode {
     }
 }
 
-impl PageCacheIoWaiter for FuseWaiter {
-    fn wait(&self) -> Result<()> {
-        if FuseWaiter::wait(self) != FuseStatus::Complete {
-            return_errno!(Errno::EIO);
+struct FusePageReadCompletion {
+    session: Arc<FuseSession>,
+    waiter: Arc<FuseWaiter>,
+    locked_page: SpinLock<Option<LockedCachePage>, LocalIrqDisabled>,
+}
+
+impl FusePageReadCompletion {
+    fn new(
+        session: Arc<FuseSession>,
+        waiter: Arc<FuseWaiter>,
+        locked_page: LockedCachePage,
+    ) -> Self {
+        Self {
+            session,
+            waiter,
+            locked_page: SpinLock::new(Some(locked_page)),
+        }
+    }
+}
+
+impl IoCompletion for FusePageReadCompletion {
+    fn wait(&self) -> core::result::Result<(), IoError> {
+        let result = self
+            .session
+            .wait_for_reply_header(&self.waiter)
+            .map_err(|_| IoError::Failed);
+
+        if let Some(locked_page) = self.locked_page.lock().take() {
+            if result.is_ok() {
+                locked_page.set_up_to_date();
+            }
         }
 
-        Ok(())
+        result
     }
+}
 
-    fn concat(&mut self, other: Box<dyn PageCacheIoWaiter>) -> Result<()> {
-        let other: Box<dyn Any + Send + Sync> = other;
-        let Ok(other) = other.downcast::<Self>() else {
-            return_errno_with_message!(Errno::EINVAL, "cannot concatenate different waiter types");
-        };
+struct FusePageWriteCompletion {
+    session: Arc<FuseSession>,
+    waiter: Arc<FuseWaiter>,
+    page: CachePage,
+    page_idx: usize,
+}
 
-        FuseWaiter::concat(self, *other);
-        Ok(())
+impl FusePageWriteCompletion {
+    fn new(
+        session: Arc<FuseSession>,
+        waiter: Arc<FuseWaiter>,
+        page: CachePage,
+        page_idx: usize,
+    ) -> Self {
+        Self {
+            session,
+            waiter,
+            page,
+            page_idx,
+        }
+    }
+}
+
+impl IoCompletion for FusePageWriteCompletion {
+    fn wait(&self) -> core::result::Result<(), IoError> {
+        let result = self
+            .session
+            .wait_for_reply_header(&self.waiter)
+            .map_err(|_| IoError::Failed);
+        cache_page::clear_writing_back(&self.page);
+
+        if result.is_err() {
+            ostd::error!(
+                "virtiofs writeback failed for page index {}; data may be lost",
+                self.page_idx
+            );
+        }
+
+        result
     }
 }
 

@@ -132,7 +132,7 @@ impl VirtioFsInode {
         size: u32,
         data_buf: FuseReadBuf,
         complete_fn: FuseCompleteFn,
-    ) -> Result<FuseWaiter> {
+    ) -> Result<Arc<FuseWaiter>> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDONLY as u32;
         let open_out = fs
@@ -246,7 +246,7 @@ impl VirtioFsInode {
         write_flags: WriteFlags,
         data_buf: FuseWriteBuf,
         complete_fn: FuseCompleteFn,
-    ) -> Result<FuseWaiter> {
+    ) -> Result<Arc<FuseWaiter>> {
         let fs = self.fs_ref();
         let flags = AccessMode::O_RDWR as u32;
         let open_out = fs

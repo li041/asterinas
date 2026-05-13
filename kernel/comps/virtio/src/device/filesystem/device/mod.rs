@@ -43,14 +43,14 @@ pub use session::{AttrVersion, FuseSession};
 use spin::Once;
 
 use super::{
-    DEVICE_NAME,
     config::{FileSystemFeatures, VirtioFsConfig},
     pool::FsDmaPool,
+    DEVICE_NAME,
 };
 use crate::{
     device::{
-        VirtioDeviceError,
         filesystem::pool::{FsDmaStorage, FuseDataBuf, FuseReadBuf, FuseWriteBuf},
+        VirtioDeviceError,
     },
     queue::{PopUsedError, VirtQueue},
     transport::VirtioTransport,
@@ -111,14 +111,14 @@ impl FileSystemDevice {
         operation: &mut Op,
         data_buf: Option<FuseDataBuf>,
         complete_fn: Option<FuseCompleteFn>,
-    ) -> Result<FuseWaiter, FuseError> {
+    ) -> Result<Arc<FuseWaiter>, FuseError> {
         let request = Arc::new(self.prepare_request(nodeid, operation, data_buf, complete_fn)?);
-        let wait_state = request.wait_state.clone();
+        let waiter = request.waiter.clone();
 
         let queue = self.select_request_queue(request.nodeid);
         self.submit(queue, request.clone());
 
-        Ok(FuseWaiter::new(wait_state))
+        Ok(waiter)
     }
 
     fn prepare_request<Op: FuseOperation>(
@@ -180,7 +180,7 @@ impl FileSystemDevice {
 pub(super) struct FuseRequest {
     nodeid: FuseNodeId,
     in_bufs: Vec<Arc<Slice<FsDmaStorage<ToDevice>>>>,
-    wait_state: Arc<RequestWaitState>,
+    waiter: Arc<FuseWaiter>,
 }
 
 impl FuseRequest {
@@ -194,33 +194,31 @@ impl FuseRequest {
         Self {
             nodeid,
             in_bufs,
-            wait_state: Arc::new(RequestWaitState::new(unique, out_bufs, complete_fn)),
+            waiter: Arc::new(FuseWaiter::new(unique, out_bufs, complete_fn)),
         }
     }
 
     fn wake_completed(&self) {
-        let status = self.wait_state.check_device_output();
-        let status = self.wait_state.complete(status);
-        if status == FuseStatus::Error(FuseStatusError::MalformedResponse) {
-            warn!("virtiofs request completed with malformed response");
-        }
+        self.waiter.complete(FuseStatus::Complete);
     }
 
     fn wake_if_expired(&self, now: Duration) {
-        let status = self.wait_state.wake_if_expired(now);
+        let status = self.waiter.wake_if_expired(now);
         if status == FuseStatus::Error(FuseStatusError::Timeout) {
             warn!("virtiofs request timed out");
         }
     }
 }
 
-struct RequestWaitState {
+/// A handle for one submitted FUSE request.
+#[must_use]
+pub struct FuseWaiter {
     unique: FuseUnique,
     out_bufs: Option<Vec<Arc<Slice<FsDmaStorage<FromDevice>>>>>,
-    inner: SpinLock<RequestWaitStateInner, LocalIrqDisabled>,
+    inner: SpinLock<FuseWaiterInner, LocalIrqDisabled>,
 }
 
-impl RequestWaitState {
+impl FuseWaiter {
     fn new(
         unique: FuseUnique,
         out_bufs: Option<Vec<Arc<Slice<FsDmaStorage<FromDevice>>>>>,
@@ -229,7 +227,7 @@ impl RequestWaitState {
         Self {
             unique,
             out_bufs,
-            inner: SpinLock::new(RequestWaitStateInner {
+            inner: SpinLock::new(FuseWaiterInner {
                 status: FuseStatus::Pending,
                 timeout_deadline: None,
                 waker: None,
@@ -238,7 +236,7 @@ impl RequestWaitState {
         }
     }
 
-    fn wait(&self) -> FuseStatus {
+    pub fn wait(&self) -> FuseStatus {
         let mut inner = self.inner.lock();
         if !inner.status.is_pending() {
             return inner.status;
@@ -281,39 +279,20 @@ impl RequestWaitState {
         self.complete(FuseStatus::Error(FuseStatusError::Timeout))
     }
 
-    fn read_reply<Op: FuseOperation>(&self, operation: Op) -> Result<Op::Output, FuseError> {
-        let out_buf = self.out_header_buf()?;
-
-        out_buf
-            .mem_obj()
-            .sync_from_device(out_buf.offset().clone())
-            .unwrap();
-
-        let mut reader = out_buf.reader().unwrap();
-        let out_header = reader.read_val::<OutHeader>().unwrap();
-
-        let out_len = out_header.len() as usize;
-        let payload_len = out_len
-            .checked_sub(size_of::<OutHeader>())
-            .ok_or(FuseError::MalformedResponse)?;
-        if out_header.unique() != self.unique {
-            return Err(FuseError::MalformedResponse);
-        }
-        if out_header.error() != 0 {
-            return Err(FuseError::RemoteError(out_header.error()));
-        }
-
-        operation.parse_reply(payload_len, &mut reader)
+    pub(super) fn out_bufs(&self) -> Option<&[Arc<Slice<FsDmaStorage<FromDevice>>>]> {
+        self.out_bufs.as_deref()
     }
 
-    fn out_header_buf(&self) -> Result<&Arc<Slice<FsDmaStorage<FromDevice>>>, FuseError> {
-        let Some(out_bufs) = self.out_bufs.as_ref() else {
-            return Err(FuseError::MalformedResponse);
+    pub(super) fn check_device_output(&self) -> Result<usize, FuseError> {
+        let result = self.check_device_output_result();
+        let status = match result {
+            Ok(_) => FuseStatus::Complete,
+            Err(FuseError::RemoteError(_)) => FuseStatus::Error(FuseStatusError::RemoteError),
+            Err(_) => FuseStatus::Error(FuseStatusError::MalformedResponse),
         };
-        let Some(out_buf) = out_bufs.first() else {
-            return Err(FuseError::MalformedResponse);
-        };
-        Ok(out_buf)
+        self.call_complete_fn(status);
+
+        result
     }
 
     fn wake_if_expired(&self, now: Duration) -> FuseStatus {
@@ -340,10 +319,6 @@ impl RequestWaitState {
 
             inner.status = status;
             inner.timeout_deadline = None;
-            let complete_fn = inner.complete_fn.take();
-            if let Some(complete_fn) = complete_fn {
-                complete_fn(status);
-            }
 
             inner.waker.take()
         };
@@ -355,33 +330,49 @@ impl RequestWaitState {
         status
     }
 
-    fn check_device_output(&self) -> FuseStatus {
-        let Some(out_bufs) = self.out_bufs.as_ref() else {
-            return FuseStatus::Complete;
-        };
-
-        for out_buf in out_bufs {
-            out_buf
-                .mem_obj()
-                .sync_from_device(out_buf.offset().clone())
-                .unwrap();
+    fn check_device_output_result(&self) -> Result<usize, FuseError> {
+        let out_header_buf = self.out_header_buf()?;
+        if let Some(out_bufs) = self.out_bufs.as_ref() {
+            for out_buf in out_bufs {
+                out_buf
+                    .mem_obj()
+                    .sync_from_device(out_buf.offset().clone())
+                    .unwrap();
+            }
         }
 
-        let Some(out_header_buf) = out_bufs.first() else {
-            return FuseStatus::Error(FuseStatusError::MalformedResponse);
-        };
         let mut reader = out_header_buf.reader().unwrap();
-        let Ok(out_header) = reader.read_val::<OutHeader>() else {
-            return FuseStatus::Error(FuseStatusError::MalformedResponse);
-        };
+        let out_header = reader
+            .read_val::<OutHeader>()
+            .map_err(|_| FuseError::MalformedResponse)?;
+
+        let payload_len = (out_header.len() as usize)
+            .checked_sub(size_of::<OutHeader>())
+            .ok_or(FuseError::MalformedResponse)?;
         if out_header.unique() != self.unique {
-            return FuseStatus::Error(FuseStatusError::MalformedResponse);
+            return Err(FuseError::MalformedResponse);
+        }
+        if out_header.error() != 0 {
+            return Err(FuseError::RemoteError(out_header.error()));
         }
 
-        if out_header.error() == 0 {
-            FuseStatus::Complete
-        } else {
-            FuseStatus::Error(FuseStatusError::RemoteError)
+        Ok(payload_len)
+    }
+
+    fn out_header_buf(&self) -> Result<&Arc<Slice<FsDmaStorage<FromDevice>>>, FuseError> {
+        let Some(out_bufs) = self.out_bufs.as_ref() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        let Some(out_buf) = out_bufs.first() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        Ok(out_buf)
+    }
+
+    fn call_complete_fn(&self, status: FuseStatus) {
+        let complete_fn = self.inner.lock().complete_fn.take();
+        if let Some(complete_fn) = complete_fn {
+            complete_fn(status);
         }
     }
 }
@@ -411,61 +402,7 @@ impl core::fmt::Debug for FsRequestQueue {
     }
 }
 
-/// A waiter for a submitted FUSE request.
-#[must_use]
-pub struct FuseWaiter {
-    wait_states: Vec<Arc<RequestWaitState>>,
-}
-
-impl FuseWaiter {
-    fn new(wait_state: Arc<RequestWaitState>) -> Self {
-        Self {
-            wait_states: vec![wait_state],
-        }
-    }
-
-    /// Creates a waiter that has already completed successfully.
-    pub fn complete() -> Self {
-        Self {
-            wait_states: Vec::new(),
-        }
-    }
-
-    /// Blocks until the request completes.
-    pub fn wait(&self) -> FuseStatus {
-        let mut status = FuseStatus::Complete;
-
-        for wait_state in &self.wait_states {
-            let request_status = wait_state.wait();
-            if status == FuseStatus::Complete && request_status != FuseStatus::Complete {
-                status = request_status;
-            }
-        }
-
-        status
-    }
-
-    /// Merges another waiter into this waiter.
-    pub fn concat(&mut self, mut other: Self) {
-        self.wait_states.append(&mut other.wait_states);
-    }
-
-    pub(crate) fn read_reply<Op: FuseOperation>(
-        &self,
-        operation: Op,
-    ) -> Result<Op::Output, FuseError> {
-        let Some(wait_state) = self.wait_states.first() else {
-            return Err(FuseError::MalformedResponse);
-        };
-        if self.wait_states.len() != 1 {
-            return Err(FuseError::MalformedResponse);
-        }
-
-        wait_state.read_reply(operation)
-    }
-}
-
-struct RequestWaitStateInner {
+struct FuseWaiterInner {
     status: FuseStatus,
     timeout_deadline: Option<Duration>,
     waker: Option<Arc<Waker>>,

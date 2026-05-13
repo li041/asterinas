@@ -6,11 +6,12 @@
 //! `FUSE_INIT` negotiation, and exposes typed request helpers.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::{
+    mem::size_of,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use aster_fuse::{
-    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID, FuseCompleteFn, FuseError,
-    FuseFileHandle, FuseNodeId, FuseOperation, FuseStatus, FuseStatusError, MIN_MAX_WRITE,
     ops::{
         forget::{ForgetIn, ForgetOperation},
         init::{FuseInitFlags, FuseInitFlags2, InitIn, InitOperation},
@@ -18,11 +19,19 @@ use aster_fuse::{
         release::{ReleaseFlags, ReleaseIn, ReleaseKind, ReleaseOperation},
         write::{WriteIn, WriteOperation},
     },
+    FuseCompleteFn, FuseError, FuseFileHandle, FuseNodeId, FuseOperation, FuseStatus,
+    FuseStatusError, OutHeader, FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_ROOT_ID,
+    MIN_MAX_WRITE,
 };
-use ostd::{info, warn};
+use aster_util::mem_obj_slice::Slice;
+use ostd::{
+    info,
+    mm::{dma::FromDevice, io::util::HasVmReaderWriter},
+    warn,
+};
 
 use super::{super::DEVICE_NAME, FileSystemDevice, FuseReadBuf, FuseWaiter, FuseWriteBuf};
-use crate::device::filesystem::pool::FuseDataBuf;
+use crate::device::filesystem::pool::{FsDmaStorage, FuseDataBuf};
 
 /// A mount-scoped FUSE session.
 ///
@@ -57,11 +66,12 @@ pub struct FuseSession {
 impl FuseSession {
     fn wait_for_submitted_request(waiter: &FuseWaiter) -> Result<(), FuseError> {
         match waiter.wait() {
-            FuseStatus::Complete | FuseStatus::Error(FuseStatusError::RemoteError) => Ok(()),
+            FuseStatus::Complete => Ok(()),
             FuseStatus::Error(FuseStatusError::Timeout) => Err(FuseError::Timeout),
-            FuseStatus::Error(FuseStatusError::MalformedResponse) | FuseStatus::Pending => {
-                Err(FuseError::MalformedResponse)
-            }
+            FuseStatus::Error(
+                FuseStatusError::MalformedResponse | FuseStatusError::RemoteError,
+            )
+            | FuseStatus::Pending => Err(FuseError::MalformedResponse),
         }
     }
 
@@ -69,17 +79,16 @@ impl FuseSession {
     /// the daemon.
     pub fn new(device: Arc<FileSystemDevice>) -> Result<Arc<Self>, FuseError> {
         let requested_flags = Self::init_flags();
-        let init_out = Self::do_fuse_op_on_device(
-            &device,
-            FUSE_ROOT_ID,
-            InitOperation::new(InitIn::new(
-                FUSE_KERNEL_VERSION,
-                FUSE_KERNEL_MINOR_VERSION,
-                0,
-                requested_flags,
-                FuseInitFlags2::empty(),
-            )),
-        )?;
+        let mut operation = InitOperation::new(InitIn::new(
+            FUSE_KERNEL_VERSION,
+            FUSE_KERNEL_MINOR_VERSION,
+            0,
+            requested_flags,
+            FuseInitFlags2::empty(),
+        ));
+        let waiter = device.submit_fuse_op(FUSE_ROOT_ID, &mut operation, None, None)?;
+        Self::wait_for_submitted_request(&waiter)?;
+        let init_out = Self::parse_reply(&waiter, operation)?;
 
         let max_write = init_out.max_write().max(MIN_MAX_WRITE);
         let session = Arc::new(Self {
@@ -172,23 +181,48 @@ impl FuseSession {
             | FuseInitFlags::INIT_EXT
     }
 
-    fn do_fuse_op_on_device<Op: FuseOperation>(
-        device: &Arc<FileSystemDevice>,
-        nodeid: FuseNodeId,
-        mut operation: Op,
-    ) -> Result<Op::Output, FuseError> {
-        let waiter = device.submit_fuse_op(nodeid, &mut operation, None, None)?;
-        Self::wait_for_submitted_request(&waiter)?;
-        waiter.read_reply(operation)
-    }
-
     /// Sends one FUSE operation and waits for the typed reply.
     pub fn do_fuse_op<Op: FuseOperation>(
         &self,
         nodeid: FuseNodeId,
+        mut operation: Op,
+    ) -> Result<Op::Output, FuseError> {
+        let waiter = self
+            .device
+            .submit_fuse_op(nodeid, &mut operation, None, None)?;
+        Self::wait_for_submitted_request(&waiter)?;
+        Self::parse_reply(&waiter, operation)
+    }
+
+    /// Waits until a submitted request completes and validates its FUSE reply header.
+    pub fn wait_for_reply_header(&self, waiter: &FuseWaiter) -> Result<(), FuseError> {
+        Self::wait_for_submitted_request(waiter)?;
+        waiter.check_device_output().map(|_| ())
+    }
+
+    fn parse_reply<Op: FuseOperation>(
+        waiter: &FuseWaiter,
         operation: Op,
     ) -> Result<Op::Output, FuseError> {
-        Self::do_fuse_op_on_device(&self.device, nodeid, operation)
+        let payload_len = waiter.check_device_output()?;
+        let out_buf = Self::out_header_buf(waiter)?;
+
+        let mut reader = out_buf.reader().unwrap();
+        reader.skip(size_of::<OutHeader>());
+
+        operation.parse_reply(payload_len, &mut reader)
+    }
+
+    fn out_header_buf(
+        waiter: &FuseWaiter,
+    ) -> Result<&Arc<Slice<FsDmaStorage<FromDevice>>>, FuseError> {
+        let Some(out_bufs) = waiter.out_bufs() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        let Some(out_buf) = out_bufs.first() else {
+            return Err(FuseError::MalformedResponse);
+        };
+        Ok(out_buf)
     }
 
     /// Allocates a buffer for `FUSE_READ` data.
@@ -258,7 +292,7 @@ impl FuseSession {
         )?;
         Self::wait_for_submitted_request(&waiter)?;
 
-        let read_len = waiter.read_reply(operation)?;
+        let read_len = Self::parse_reply(&waiter, operation)?;
         if read_len > len {
             return Err(FuseError::MalformedResponse);
         }
@@ -272,7 +306,7 @@ impl FuseSession {
         read_in: ReadIn,
         data_buf: FuseReadBuf,
         complete_fn: Option<FuseCompleteFn>,
-    ) -> Result<FuseWaiter, FuseError> {
+    ) -> Result<Arc<FuseWaiter>, FuseError> {
         let mut operation = ReadOperation::new(read_in);
         self.device.submit_fuse_op(
             nodeid,
@@ -298,7 +332,7 @@ impl FuseSession {
         )?;
         Self::wait_for_submitted_request(&waiter)?;
 
-        let write_out = waiter.read_reply(operation)?;
+        let write_out = Self::parse_reply(&waiter, operation)?;
         if write_out.size() > write_size {
             return Err(FuseError::MalformedResponse);
         }
@@ -312,7 +346,7 @@ impl FuseSession {
         write_in: WriteIn,
         data_buf: FuseWriteBuf,
         complete_fn: Option<FuseCompleteFn>,
-    ) -> Result<FuseWaiter, FuseError> {
+    ) -> Result<Arc<FuseWaiter>, FuseError> {
         let mut operation = WriteOperation::new(write_in);
         self.device.submit_fuse_op(
             nodeid,
