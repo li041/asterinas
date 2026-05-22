@@ -90,7 +90,7 @@ use ostd::mm::{Segment, VmIo, VmIoFill, io::util::HasVmReaderWriter};
 
 use crate::prelude::*;
 
-mod cache_page;
+pub mod cache_page;
 #[cfg(ktest)]
 mod tests;
 mod vmo;

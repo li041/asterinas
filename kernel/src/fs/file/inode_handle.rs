@@ -123,8 +123,13 @@ impl InodeHandle {
             return_errno_with_message!(Errno::EBADF, "the file is not opened readable");
         }
 
+        let file_ops: &dyn FileOps = if let Some(ref open_file) = self.open_file {
+            open_file.as_ref()
+        } else {
+            self.path.inode().as_ref()
+        };
         let mut offset = self.offset.lock();
-        let read_cnt = self.path.inode().readdir_at(*offset, visitor)?;
+        let read_cnt = file_ops.readdir_at(*offset, visitor)?;
         *offset += read_cnt;
         Ok(read_cnt)
     }
@@ -405,14 +410,9 @@ impl FileLike for InodeHandle {
         }
 
         if let Some(ref open_file) = self.open_file {
-            open_file.check_seekable()?;
-            if open_file.is_offset_aware() {
-                // TODO: Figure out whether we need to add support for seeking from the end of
-                // special files.
-                return do_seek_util(&self.offset, pos, None);
-            } else {
-                return Ok(0);
-            }
+            // TODO: Figure out whether we need to add support for seeking from the end of
+            // special files.
+            return open_file.seek(&self.offset, pos);
         }
 
         let inode = self.path.inode();
@@ -555,6 +555,16 @@ pub trait PerOpenFileOps: Pollable + FileOps + Any + Send + Sync + 'static {
 
     fn ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
         return_errno_with_message!(Errno::ENOTTY, "ioctl is not supported");
+    }
+
+    /// Seeks the shared file offset for this opened file description.
+    fn seek(&self, offset: &Mutex<usize>, pos: SeekFrom) -> Result<usize> {
+        self.check_seekable()?;
+        if !self.is_offset_aware() {
+            return Ok(0);
+        }
+
+        do_seek_util(offset, pos, None)
     }
 }
 
