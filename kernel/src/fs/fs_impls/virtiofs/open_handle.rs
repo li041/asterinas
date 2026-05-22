@@ -125,9 +125,10 @@ impl OpenHandles {
 
     /// Registers a handle, pruning dead weak references first.
     pub(super) fn insert(&self, handle: &Arc<VirtioFsOpenHandle>) {
-        self.prune();
+        let mut handles = self.handles.lock();
 
-        self.handles.lock().push(Arc::downgrade(handle));
+        handles.retain(|h| h.strong_count() > 0);
+        handles.push(Arc::downgrade(handle));
     }
 
     /// Finds a readable handle, if any.
@@ -138,12 +139,6 @@ impl OpenHandles {
     /// Finds a writable handle, if any.
     pub(super) fn find_writable_handle(&self) -> Option<Arc<VirtioFsOpenHandle>> {
         self.find_handle(AccessMode::is_writable)
-    }
-
-    fn prune(&self) {
-        self.handles
-            .lock()
-            .retain(|handle| handle.strong_count() > 0);
     }
 
     fn find_handle(

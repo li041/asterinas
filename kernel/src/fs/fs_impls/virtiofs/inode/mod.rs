@@ -378,7 +378,16 @@ impl Inode for VirtioFsInode {
     }
 
     fn sync_data(&self) -> Result<()> {
-        self.invalidate_whole_page_cache()
+        let _size_guard = self.size_lock.write();
+        let Some(page_cache) = &self.page_cache else {
+            return Ok(());
+        };
+        let cached_size = page_cache.size();
+        if cached_size > 0 {
+            page_cache.flush_range(0..cached_size)?;
+        }
+
+        Ok(())
     }
 
     fn fs(&self) -> Arc<dyn FileSystem> {
