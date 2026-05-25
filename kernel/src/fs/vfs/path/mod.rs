@@ -76,6 +76,22 @@ impl Path {
         Ok(Self::new(self.mount.clone(), new_child_dentry))
     }
 
+    /// Creates a new symbolic-link child with `target`.
+    pub fn new_symlink_child(&self, name: &str, target: &str, mode: InodeMode) -> Result<Self> {
+        if self
+            .inode()
+            .check_permission(Permission::MAY_WRITE)
+            .is_err()
+        {
+            return_errno!(Errno::EACCES);
+        }
+        let new_child_dentry = self
+            .dentry
+            .as_dir_dentry_or_err()?
+            .symlink(name, target, mode)?;
+        Ok(Self::new(self.mount.clone(), new_child_dentry))
+    }
+
     /// Creates a new pseudo `Path`.
     pub(in crate::fs) fn new_pseudo(
         mount: Arc<Mount>,

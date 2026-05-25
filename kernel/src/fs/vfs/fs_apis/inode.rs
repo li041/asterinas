@@ -365,6 +365,17 @@ pub trait Inode: Any + FileOps + Send + Sync {
         Err(Error::new(Errno::ENOTDIR))
     }
 
+    /// Creates a symbolic link named `name` with `target` in this directory.
+    ///
+    /// Filesystems whose backend creates symlinks atomically should override
+    /// this method. The default preserves the existing create-then-write
+    /// behavior for in-memory and local filesystem implementations.
+    fn symlink(&self, name: &str, target: &str, mode: InodeMode) -> Result<Arc<dyn Inode>> {
+        let inode = self.create(name, InodeType::SymLink, mode)?;
+        inode.write_link(target)?;
+        Ok(inode)
+    }
+
     fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Arc<dyn Inode>> {
         Err(Error::new(Errno::ENOTDIR))
     }

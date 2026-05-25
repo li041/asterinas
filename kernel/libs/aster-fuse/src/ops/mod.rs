@@ -32,5 +32,6 @@ pub mod release;
 pub mod rmdir;
 pub mod setattr;
 pub mod statfs;
+pub mod symlink;
 pub mod unlink;
 pub mod write;

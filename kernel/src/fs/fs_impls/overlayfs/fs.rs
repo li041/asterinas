@@ -299,6 +299,49 @@ impl OverlayInode {
         Ok(new_child)
     }
 
+    /// Creates a symbolic link atomically in the writable upper layer.
+    pub fn symlink(&self, name: &str, target: &str, mode: InodeMode) -> Result<Arc<dyn Inode>> {
+        if self.type_ != InodeType::Dir {
+            return_errno!(Errno::ENOTDIR);
+        }
+
+        let is_whiteout = match self.lookup_inner(name) {
+            Ok(Some(_)) => return_errno!(Errno::EEXIST),
+            Ok(None) => true,
+            Err(e) => {
+                if e.error() != Errno::ENOENT {
+                    return Err(e);
+                }
+                false
+            }
+        };
+
+        if !is_whiteout {
+            self.build_upper_recursively_if_needed()?;
+        }
+
+        let upper_guard = self.upper.lock();
+        let upper = upper_guard.as_ref().unwrap();
+        if is_whiteout {
+            upper.unlink(&whiteout_name(name))?;
+        }
+
+        let new_upper = upper.symlink(name, target, mode)?;
+        let new_child = Arc::new_cyclic(|weak| OverlayInode {
+            ino: new_upper.ino(),
+            type_: InodeType::SymLink,
+            name_upon_creation: SpinLock::new(String::from(name)),
+            extension: Extension::new(),
+            parent: Some(self.self_.upgrade().unwrap()),
+            upper: Mutex::new(Some(new_upper)),
+            upper_is_opaque: false,
+            lowers: Vec::new(),
+            fs: self.fs.clone(),
+            self_: weak.clone(),
+        });
+        Ok(new_child)
+    }
+
     /// Writes data to the target inode, if it resides in the lower layer,
     /// it will be copied up to the upper layer.
     /// The corresponding parent directories will be created also if they do not exist.
@@ -983,6 +1026,7 @@ impl Inode for OverlayInode {
     fn set_ctime(&self, time: Duration);
     fn page_cache(&self) -> Option<PageCache>;
     fn create(&self, name: &str, type_: InodeType, mode: InodeMode) -> Result<Arc<dyn Inode>>;
+    fn symlink(&self, name: &str, target: &str, mode: InodeMode) -> Result<Arc<dyn Inode>>;
     fn mknod(&self, name: &str, mode: InodeMode, type_: MknodType) -> Result<Arc<dyn Inode>>;
     fn open(
         &self,

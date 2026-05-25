@@ -20,6 +20,7 @@ use aster_fuse::{
         open::{OpenIn, OpendirOperation},
         release::ReleaseOptions,
         rmdir::RmdirOperation,
+        symlink::SymlinkOperation,
         unlink::UnlinkOperation,
     },
 };
@@ -340,6 +341,14 @@ impl Inode for VirtioFsInode {
                 )
             }
         };
+        Ok(VirtioFsInode::build_child_inode(&fs, entry_out))
+    }
+
+    fn symlink(&self, name: &str, target: &str, _mode: InodeMode) -> Result<Arc<dyn Inode>> {
+        let fs = self.fs_ref();
+        let entry_out = fs
+            .session()
+            .do_fuse_op(self.nodeid(), SymlinkOperation::new(name, target))?;
         Ok(VirtioFsInode::build_child_inode(&fs, entry_out))
     }
 
