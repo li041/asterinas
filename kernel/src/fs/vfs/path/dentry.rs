@@ -426,6 +426,36 @@ impl DirDentry<'_> {
         Ok(self.insert_positive_child(&mut children, name, new_child))
     }
 
+    /// Creates a symbolic-link `Dentry` with its target in one filesystem operation.
+    pub(super) fn symlink(&self, name: &str, target: &str, mode: InodeMode) -> Result<Arc<Dentry>> {
+        let children = self.children.upread();
+        if let Some(entry) = children.find(name)
+            && entry.is_positive()
+        {
+            if self.revalidate_cached_entry(name, &entry) {
+                return_errno_with_message!(Errno::EEXIST, "the dentry already exists");
+            }
+
+            let mut children = children.upgrade();
+            let _ = children.remove(name);
+            let new_inode = self.inode.symlink(name, target, mode)?;
+            let new_child = Dentry::new(
+                new_inode,
+                DentryOptions::Named((String::from(name), self.this())),
+            );
+            return Ok(self.insert_positive_child(&mut children, name, new_child));
+        }
+
+        let new_inode = self.inode.symlink(name, target, mode)?;
+        let mut children = children.upgrade();
+        let new_child = Dentry::new(
+            new_inode,
+            DentryOptions::Named((String::from(name), self.this())),
+        );
+
+        Ok(self.insert_positive_child(&mut children, name, new_child))
+    }
+
     /// Inserts a positive child dentry into the directory cache.
     fn insert_positive_child(
         &self,
