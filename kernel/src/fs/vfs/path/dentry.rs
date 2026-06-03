@@ -692,7 +692,17 @@ impl DirDentry<'_> {
             children.check_mountpoint(new_name)?;
             let old_dentry = children.probe_cached_child_for_rename(&old_dir, old_name)?;
 
-            old_dir_inode.rename(old_name, old_dir_inode, new_name)?;
+            if let Err(err) = old_dir_inode.rename(old_name, old_dir_inode, new_name) {
+                if err.error() == Errno::ENOENT
+                    && old_dir
+                        .revalidation_policy
+                        .contains(RevalidationPolicy::REVALIDATE_EXISTS)
+                {
+                    children.remove(old_name);
+                    children.remove(new_name);
+                }
+                return Err(err);
+            }
 
             match old_dentry.as_ref() {
                 Some(dentry) => {
@@ -714,7 +724,24 @@ impl DirDentry<'_> {
             let old_dentry = self_children.probe_cached_child_for_rename(&old_dir, old_name)?;
             new_dir_children.check_mountpoint(new_name)?;
 
-            old_dir_inode.rename(old_name, new_dir_inode, new_name)?;
+            if let Err(err) = old_dir_inode.rename(old_name, new_dir_inode, new_name) {
+                if err.error() == Errno::ENOENT {
+                    if old_dir
+                        .revalidation_policy
+                        .contains(RevalidationPolicy::REVALIDATE_EXISTS)
+                    {
+                        self_children.remove(old_name);
+                    }
+                    if new_dir
+                        .revalidation_policy
+                        .contains(RevalidationPolicy::REVALIDATE_EXISTS)
+                    {
+                        new_dir_children.remove(new_name);
+                    }
+                }
+                return Err(err);
+            }
+
             match old_dentry.as_ref() {
                 Some(dentry) => {
                     self_children.delete(old_name);
