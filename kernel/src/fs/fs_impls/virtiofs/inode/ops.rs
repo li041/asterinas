@@ -28,13 +28,11 @@ use super::{
     },
     TimeField, VirtioFsInode, WriteOffset,
     metadata::StaleAttrAction,
-    metadata_from_attr,
 };
 use crate::{
     fs::{
         file::{AccessMode, PerOpenFileOps, StatusFlags},
         utils::DirentVisitor,
-        vfs::file_system::FileSystem,
     },
     prelude::*,
     thread::work_queue::{self, WorkPriority},
@@ -412,29 +410,13 @@ impl VirtioFsInode {
         Ok(Box::new(VirtioFsDir::new(inode, open_handle)))
     }
 
-    /// Builds a child inode from a FUSE entry reply.
-    ///
-    /// This is used for operations that instantiate a new inode cache entry.
-    /// There is no existing cache for that child, so no stale-reply merge is
-    /// needed; the entry and attr TTLs are installed as the initial deadlines.
+    /// Builds or reuses a child inode from a FUSE entry reply.
     pub(super) fn build_child_inode(
         fs: &Arc<VirtioFs>,
         entry_reply: EntryReply,
-    ) -> Arc<VirtioFsInode> {
-        let entry_valid_until =
-            valid_until(entry_reply.entry_valid(), entry_reply.entry_valid_nsec());
-        let attr_reply = FuseAttrReply::from(&entry_reply);
-        let attr_valid_until = valid_until(attr_reply.attr_valid(), attr_reply.attr_valid_nsec());
-
-        VirtioFsInode::new(
-            entry_reply.nodeid(),
-            entry_reply.generation(),
-            metadata_from_attr(attr_reply.attr(), fs.sb().container_dev_id),
-            Arc::downgrade(fs),
-            entry_valid_until,
-            attr_valid_until,
-            fs.session().bump_attr_version(),
-        )
+        request_attr_version: AttrVersion,
+    ) -> Result<Arc<VirtioFsInode>> {
+        fs.get_or_insert_inode_from_entry(entry_reply, request_attr_version)
     }
 
     /// Commits an `EntryReply` reply for this cached inode.
@@ -456,6 +438,12 @@ impl VirtioFsInode {
             request_attr_version,
             stale_action,
         )
+    }
+
+    /// Refreshes the directory-entry cache deadline for this inode.
+    pub(super) fn refresh_entry_valid_until(&self, entry_reply: &EntryReply) {
+        *self.entry_valid_until.lock() =
+            valid_until(entry_reply.entry_valid(), entry_reply.entry_valid_nsec());
     }
 
     /// Reads directory entries and expires this directory's attribute cache.

@@ -6,11 +6,15 @@
 
 use core::time::Duration;
 
-use aster_fuse::{FUSE_ROOT_ID, Kstatfs, StatfsOperation, ops::lookup::LookupOperation};
-use aster_virtio::device::filesystem::device::{self, FileSystemDevice, FuseSession};
+use aster_fuse::{
+    EntryReply, FUSE_ROOT_ID, FuseGeneration, FuseNodeId, Kstatfs, StatfsOperation,
+    ops::lookup::LookupOperation,
+};
+use aster_virtio::device::filesystem::device::{self, AttrVersion, FileSystemDevice, FuseSession};
 use device_id::DeviceId;
+use hashbrown::HashMap;
 
-use super::{inode::VirtioFsInode, valid_until};
+use super::{inode, inode::VirtioFsInode, valid_until};
 use crate::{
     fs::{
         pseudofs::AnonDeviceId,
@@ -65,7 +69,20 @@ pub(super) struct VirtioFs {
     root: Arc<VirtioFsInode>,
     tag: String,
     session: Arc<FuseSession>,
+    inode_cache: RwMutex<HashMap<InodeCacheKey, Weak<VirtioFsInode>>>,
     fs_event_subscriber_stats: FsEventSubscriberStats,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct InodeCacheKey {
+    nodeid: FuseNodeId,
+    generation: FuseGeneration,
+}
+
+impl InodeCacheKey {
+    pub(super) const fn new(nodeid: FuseNodeId, generation: FuseGeneration) -> Self {
+        Self { nodeid, generation }
+    }
 }
 
 impl VirtioFs {
@@ -84,25 +101,28 @@ impl VirtioFs {
         let sb = SuperBlock::from((container_dev_id, statfs));
 
         let root_entry = session.do_fuse_op(FUSE_ROOT_ID, LookupOperation::new("."))?;
-        let root_metadata = super::inode::metadata_from_attr(root_entry.attr(), container_dev_id);
-        let attr_valid_until = valid_until(root_entry.attr_valid(), root_entry.attr_valid_nsec());
 
         Ok(Arc::new_cyclic(|weak_fs| {
             let root = VirtioFsInode::new(
                 FUSE_ROOT_ID,
                 root_entry.generation(),
-                root_metadata,
+                inode::metadata_from_attr(root_entry.attr(), container_dev_id),
                 weak_fs.clone(),
                 Duration::MAX,
-                attr_valid_until,
+                valid_until(root_entry.attr_valid(), root_entry.attr_valid_nsec()),
                 session.bump_attr_version(),
             );
+            let inode_cache = RwMutex::new(HashMap::from_iter([(
+                root.cache_key(),
+                Arc::downgrade(&root),
+            )]));
 
             Self {
                 sb,
                 root,
                 tag,
                 session,
+                inode_cache,
                 fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             }
         }))
@@ -110,6 +130,44 @@ impl VirtioFs {
 
     pub(super) fn session(&self) -> &Arc<FuseSession> {
         &self.session
+    }
+
+    pub(super) fn get_or_insert_inode_from_entry(
+        self: &Arc<Self>,
+        entry_reply: EntryReply,
+        request_attr_version: AttrVersion,
+    ) -> Result<Arc<VirtioFsInode>> {
+        let key = InodeCacheKey::new(entry_reply.nodeid(), entry_reply.generation());
+
+        if let Some(inode) = self.get_cached_inode(key) {
+            inode.reuse_from_entry_reply(&entry_reply, request_attr_version)?;
+            return Ok(inode);
+        }
+
+        let mut inode_cache = self.inode_cache.write();
+        if let Some(inode) = inode_cache.get(&key).and_then(Weak::upgrade) {
+            drop(inode_cache);
+            inode.reuse_from_entry_reply(&entry_reply, request_attr_version)?;
+            return Ok(inode);
+        }
+        inode_cache.remove(&key);
+
+        let inode = VirtioFsInode::new(
+            entry_reply.nodeid(),
+            entry_reply.generation(),
+            inode::metadata_from_attr(entry_reply.attr(), self.sb.container_dev_id),
+            Arc::downgrade(self),
+            valid_until(entry_reply.entry_valid(), entry_reply.entry_valid_nsec()),
+            valid_until(entry_reply.attr_valid(), entry_reply.attr_valid_nsec()),
+            self.session.bump_attr_version(),
+        );
+        inode_cache.insert(key, Arc::downgrade(&inode));
+
+        Ok(inode)
+    }
+
+    fn get_cached_inode(&self, key: InodeCacheKey) -> Option<Arc<VirtioFsInode>> {
+        self.inode_cache.read().get(&key).and_then(Weak::upgrade)
     }
 }
 
