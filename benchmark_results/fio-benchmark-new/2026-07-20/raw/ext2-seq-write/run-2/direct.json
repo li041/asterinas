@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Average direct file write bandwidth on Linux",
+    "unit": "MB/s",
+    "value": "1551.89",
+    "extra": "linux_result"
+  },
+  {
+    "name": "Average direct file write bandwidth on Asterinas",
+    "unit": "MB/s",
+    "value": "1443.89",
+    "extra": "aster_result"
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Average direct file read bandwidth on Linux",
+    "unit": "MB/s",
+    "value": "9668.92",
+    "extra": "linux_result"
+  },
+  {
+    "name": "Average direct file read bandwidth on Asterinas",
+    "unit": "MB/s",
+    "value": "6169.82",
+    "extra": "aster_result"
+  }
+]

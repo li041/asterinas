@@ -1,0 +1,21 @@
+{
+  "source_branch": "fio-benchmark-new",
+  "source_commit": "897734c74304541ad1bc97e2b070b619e962e223",
+  "started_at": "2026-07-17",
+  "completed_at": "2026-07-20T04:29:16Z",
+  "repetitions": 3,
+  "fio": {
+    "block_size": "1M",
+    "file_size": "1G",
+    "ioengine": "sync",
+    "ramp_time_seconds": 60,
+    "runtime_seconds": 100
+  },
+  "environment": {
+    "qemu": "QEMU 10.2.1",
+    "virtiofsd": "virtiofsd 1.10.0",
+    "host": "Linux 6.11.0-rc3-snp-host-85ef1ac03941 x86_64",
+    "linux_kernel_sha256": "1d3e8a88663bca07a62aa769559f49153ddbdda1062b0ce2c1dc9d77b06d24e7"
+  },
+  "raw_json_sha256": "8a82796412e80d1767a46378e62c9df011e9cddd3cc6fe8973ec1150386eec2f"
+}
