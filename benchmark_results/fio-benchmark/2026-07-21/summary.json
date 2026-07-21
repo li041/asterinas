@@ -1,0 +1,6 @@
+[
+  { "workload": "read", "mode": "cached", "linux_mb_per_sec": 32534.4, "asterinas_mb_per_sec": 13529.1, "asterinas_over_linux_percent": 41.58 },
+  { "workload": "read", "mode": "direct", "linux_mb_per_sec": 10449.1, "asterinas_mb_per_sec": 5081.4, "asterinas_over_linux_percent": 48.63 },
+  { "workload": "write", "mode": "cached", "linux_mb_per_sec": 3901.75, "asterinas_mb_per_sec": 594.543, "asterinas_over_linux_percent": 15.24 },
+  { "workload": "write", "mode": "direct", "linux_mb_per_sec": 2156.92, "asterinas_mb_per_sec": 3378.51, "asterinas_over_linux_percent": 156.64 }
+]

@@ -1,0 +1,14 @@
+{
+  "workload": "direct sequential write",
+  "unit": "MB/s",
+  "baseline": {
+    "source_commit": "61b6e07e4664383ae27463738f979dcc54936c58",
+    "asterinas": 3378.51
+  },
+  "with_pr_3605": {
+    "base_commit": "61b6e07e4664383ae27463738f979dcc54936c58",
+    "optimization_commit": "6e2022cf6a5b5cf4874ee0dae0b02a8c1f2930c9",
+    "asterinas": 6018
+  },
+  "improvement_percent": 78.13
+}

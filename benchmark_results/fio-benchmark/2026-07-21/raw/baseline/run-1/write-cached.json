@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Average cached file write bandwidth on Linux",
+    "unit": "MB/s",
+    "value": "3901.75",
+    "extra": "linux_result"
+  },
+  {
+    "name": "Average cached file write bandwidth on Asterinas",
+    "unit": "MB/s",
+    "value": "594.543",
+    "extra": "aster_result"
+  }
+]

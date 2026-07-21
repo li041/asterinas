@@ -1,0 +1,30 @@
+{
+  "date": "2026-07-21",
+  "repetitions": 1,
+  "baseline": {
+    "pull_request": 3419,
+    "source_branch": "li041:fio-benchmark",
+    "source_commit": "61b6e07e4664383ae27463738f979dcc54936c58"
+  },
+  "direct_write_optimization": {
+    "pull_request": 3605,
+    "source_commit": "6e2022cf6a5b5cf4874ee0dae0b02a8c1f2930c9",
+    "applied_on": "61b6e07e4664383ae27463738f979dcc54936c58"
+  },
+  "fio": {
+    "block_size": "1M",
+    "file_size": "1G",
+    "ioengine": "sync",
+    "ramp_time_seconds": 60,
+    "runtime_seconds": 100,
+    "numjobs": 1,
+    "fsync_on_close": true
+  },
+  "environment": {
+    "qemu": "QEMU 10.2.1",
+    "virtiofsd": "virtiofsd 1.10.0",
+    "virtiofsd_cache": "auto",
+    "host": "Linux 6.11.0-rc3-snp-host-85ef1ac03941 x86_64",
+    "linux_kernel_sha256": "1d3e8a88663bca07a62aa769559f49153ddbdda1062b0ce2c1dc9d77b06d24e7"
+  }
+}
