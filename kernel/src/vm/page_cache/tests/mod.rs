@@ -151,6 +151,108 @@ fn concurrent_write_and_flush() {
     assert_eq!(backend.persisted_page_bytes(0), latest_dirty_pattern);
 }
 
+#[ktest]
+fn completed_write_through_keeps_pages_clean() {
+    let backend = MockPageCacheBackend::new(1);
+    let page_cache = new_backend_page_cache(&backend, 1);
+    let pattern = vec![0x31; PAGE_SIZE];
+    let mut snapshot = vec![0; PAGE_SIZE];
+    let mut reader = VmReader::from(pattern.as_slice()).to_fallible();
+    let mut writer = VmWriter::from(snapshot.as_mut_slice()).to_fallible();
+
+    let write_through = page_cache
+        .prepare_write_through(0, &mut reader, &mut writer)
+        .unwrap();
+    assert_eq!(snapshot, pattern);
+    backend.set_persisted_page_bytes(0, &snapshot);
+    write_through.complete();
+
+    page_cache.flush_range(0..PAGE_SIZE).unwrap();
+    assert_eq!(backend.write_count(0), 0);
+
+    let mut read_buffer = vec![0; PAGE_SIZE];
+    page_cache.read_bytes(0, &mut read_buffer).unwrap();
+    assert_eq!(read_buffer, pattern);
+}
+
+#[ktest]
+fn failed_write_through_invalidates_stale_pages() {
+    let backend = MockPageCacheBackend::new(1);
+    let page_cache = new_backend_page_cache(&backend, 1);
+    let persisted_pattern = vec![0x42; PAGE_SIZE];
+    let failed_pattern = vec![0x53; PAGE_SIZE];
+    let mut snapshot = vec![0; PAGE_SIZE];
+    let mut reader = VmReader::from(failed_pattern.as_slice()).to_fallible();
+    let mut writer = VmWriter::from(snapshot.as_mut_slice()).to_fallible();
+    backend.set_persisted_page_bytes(0, &persisted_pattern);
+
+    page_cache
+        .prepare_write_through(0, &mut reader, &mut writer)
+        .unwrap()
+        .invalidate();
+
+    let mut read_buffer = vec![0; PAGE_SIZE];
+    page_cache.read_bytes(0, &mut read_buffer).unwrap();
+    assert_eq!(read_buffer, persisted_pattern);
+    assert_eq!(backend.read_count(0), 1);
+    assert_eq!(backend.write_count(0), 0);
+}
+
+#[ktest]
+fn failed_write_through_preserves_concurrent_dirty_data() {
+    let backend = MockPageCacheBackend::new(1);
+    let page_cache = new_backend_page_cache(&backend, 1);
+    let submitted_pattern = vec![0x64; PAGE_SIZE];
+    let latest_pattern = vec![0x75; PAGE_SIZE];
+    let mut snapshot = vec![0; PAGE_SIZE];
+    let mut reader = VmReader::from(submitted_pattern.as_slice()).to_fallible();
+    let mut writer = VmWriter::from(snapshot.as_mut_slice()).to_fallible();
+
+    let write_through = page_cache
+        .prepare_write_through(0, &mut reader, &mut writer)
+        .unwrap();
+    page_cache.write_bytes(0, &latest_pattern).unwrap();
+    write_through.invalidate();
+
+    page_cache.flush_range(0..PAGE_SIZE).unwrap();
+    assert_eq!(backend.write_count(0), 1);
+    assert_eq!(backend.persisted_page_bytes(0), latest_pattern);
+}
+
+#[ktest]
+fn partial_write_through_flushes_preexisting_dirty_data() {
+    const WRITE_OFFSET: usize = 128;
+    const WRITE_LEN: usize = 64;
+
+    let backend = MockPageCacheBackend::new(1);
+    let page_cache = new_backend_page_cache(&backend, 1);
+    let old_dirty_pattern = vec![0x26; PAGE_SIZE];
+    let write_pattern = vec![0x37; WRITE_LEN];
+    let mut expected_pattern = old_dirty_pattern.clone();
+    expected_pattern[WRITE_OFFSET..WRITE_OFFSET + WRITE_LEN].copy_from_slice(&write_pattern);
+
+    page_cache.write_bytes(0, &old_dirty_pattern).unwrap();
+
+    let mut snapshot = vec![0; WRITE_LEN];
+    let mut reader = VmReader::from(write_pattern.as_slice()).to_fallible();
+    let mut writer = VmWriter::from(snapshot.as_mut_slice()).to_fallible();
+    let write_through = page_cache
+        .prepare_write_through(WRITE_OFFSET, &mut reader, &mut writer)
+        .unwrap();
+
+    assert_eq!(backend.write_count(0), 1);
+    assert_eq!(snapshot, write_pattern);
+    backend.set_persisted_page_bytes(0, &expected_pattern);
+    write_through.complete();
+
+    page_cache.flush_range(0..PAGE_SIZE).unwrap();
+    assert_eq!(backend.write_count(0), 1);
+
+    let mut read_buffer = vec![0; PAGE_SIZE];
+    page_cache.read_bytes(0, &mut read_buffer).unwrap();
+    assert_eq!(read_buffer, expected_pattern);
+}
+
 /// Re-dirties a page while another task runs `flush_range()` and
 /// `evict_range()`, ensuring the newest dirty page is kept cached.
 #[ktest]

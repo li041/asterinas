@@ -261,6 +261,64 @@ pub struct LockedCachePage<PageRef: Borrow<CachePage> = CachePage> {
 /// A borrowed guard for a locked cache page.
 pub type LockedCachePageGuard<'a> = LockedCachePage<&'a CachePage>;
 
+/// Pages whose current contents are being written through to a backend.
+///
+/// The pages are clean while the write is in flight so a concurrent write can
+/// make them dirty again. Completing the operation preserves that newer dirty
+/// state. Invalidating a failed operation only changes pages that are still
+/// clean, so newer writes are not discarded.
+#[must_use]
+pub(crate) struct PageCacheWriteThrough {
+    pages: Option<Vec<CachePage>>,
+}
+
+impl PageCacheWriteThrough {
+    pub(super) fn new(pages: Vec<CachePage>) -> Self {
+        Self { pages: Some(pages) }
+    }
+
+    pub(super) fn push(&mut self, page: CachePage) {
+        self.pages
+            .as_mut()
+            .expect("write-through operation already finished")
+            .push(page);
+    }
+
+    /// Finishes a write-through operation accepted in full by the backend.
+    pub(crate) fn complete(mut self) {
+        self.finish(false);
+    }
+
+    /// Invalidates cached contents that may differ from the backend.
+    pub(crate) fn invalidate(mut self) {
+        self.finish(true);
+    }
+
+    fn finish(&mut self, invalidate: bool) {
+        let Some(pages) = self.pages.take() else {
+            return;
+        };
+
+        for page in pages {
+            if invalidate {
+                let _ = page.metadata().state.compare_exchange(
+                    PageState::UpToDate,
+                    PageState::Uninit,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+            page.clear_writing_back();
+        }
+    }
+}
+
+impl Drop for PageCacheWriteThrough {
+    fn drop(&mut self) {
+        self.finish(true);
+    }
+}
+
 impl<PageRef: Borrow<CachePage>> Debug for LockedCachePage<PageRef> {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         f.debug_struct("LockedCachePage")
@@ -290,6 +348,14 @@ impl<PageRef: Borrow<CachePage>> LockedCachePage<PageRef> {
             .metadata()
             .state
             .store(PageState::UpToDate, Ordering::Release);
+    }
+
+    /// Marks the page as uninitialized.
+    pub(super) fn set_uninit(&self) {
+        self.page()
+            .metadata()
+            .state
+            .store(PageState::Uninit, Ordering::Release);
     }
 
     /// Marks the page as dirty.

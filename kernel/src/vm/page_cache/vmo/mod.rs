@@ -31,7 +31,7 @@ use xarray::{Cursor, LockedXArray, XArray};
 
 use crate::{
     prelude::*,
-    vm::page_cache::{CachePage, CachePageExt, PageCacheBackend},
+    vm::page_cache::{CachePage, CachePageExt, PageCacheBackend, PageCacheWriteThrough},
 };
 
 mod options;
@@ -690,6 +690,73 @@ pub struct BackedVmo<'a> {
 }
 
 impl<'a> BackedVmo<'a> {
+    /// Copies a write into cache pages and captures the backend snapshot.
+    pub(super) fn prepare_write_through(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        snapshot_writer: &mut VmWriter,
+    ) -> Result<PageCacheWriteThrough> {
+        let write_len = reader.remain();
+        let write_end = offset
+            .checked_add(write_len)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "write-through range overflow"))?;
+        if write_end > self.size() || snapshot_writer.avail() < write_len {
+            return_errno_with_message!(Errno::EINVAL, "invalid write-through buffer range");
+        }
+
+        let mut write_through = PageCacheWriteThrough::new(Vec::new());
+        let mut current_offset = offset;
+
+        while reader.has_remain() {
+            let page_idx = current_offset / PAGE_SIZE;
+            let page_offset = current_offset % PAGE_SIZE;
+            let copy_len = reader.remain().min(PAGE_SIZE - page_offset);
+            let commit_mode = if page_offset == 0 && copy_len == PAGE_SIZE {
+                CommitMode::Overwrite
+            } else {
+                CommitMode::Read
+            };
+            let page = self.commit_on_internal(page_idx, commit_mode)?;
+
+            loop {
+                let locked_page = page.clone().lock();
+                locked_page.wait_until_finish_writing_back();
+
+                if locked_page.is_dirty() {
+                    let mut io_batch = IoBatch::with_capacity(1);
+                    self.backend
+                        .write_page_async(page_idx, locked_page, &mut io_batch)?;
+                    io_batch.wait_all().map_err(Error::from)?;
+                    continue;
+                }
+
+                let mut page_writer = locked_page.writer();
+                page_writer.skip(page_offset).limit(copy_len);
+                if let Err((err, _)) = page_writer.write_fallible(reader) {
+                    locked_page.set_uninit();
+                    return Err(err.into());
+                }
+
+                let mut page_reader = locked_page.reader();
+                page_reader.skip(page_offset).limit(copy_len);
+                if let Err((err, _)) = page_reader.read_fallible(snapshot_writer) {
+                    locked_page.set_uninit();
+                    return Err(err.into());
+                }
+
+                locked_page.set_writing_back();
+                locked_page.set_up_to_date();
+                write_through.push(locked_page.unlock());
+                break;
+            }
+
+            current_offset += copy_len;
+        }
+
+        Ok(write_through)
+    }
+
     /// Writes back dirty pages in the specified byte range to the backend storage.
     pub(super) fn flush_dirty_pages(&self, range: &Range<usize>) -> Result<()> {
         let locked_pages = self.vmo.pages.lock();

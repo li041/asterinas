@@ -95,6 +95,7 @@ mod cache_page;
 mod tests;
 mod vmo;
 
+pub(crate) use cache_page::PageCacheWriteThrough;
 pub use cache_page::{CachePage, CachePageExt, CachePageMeta, LockedCachePage};
 pub use vmo::{Vmo, VmoCommitError, VmoFlags, VmoOptions, WritableMappingStatus};
 
@@ -276,6 +277,32 @@ impl PageCache {
         };
 
         vmo.flush_dirty_pages(&range)
+    }
+
+    /// Prepares data for a synchronous write-through operation.
+    ///
+    /// This copies `reader` into both the page cache at `offset` and
+    /// `snapshot_writer`. For each affected page, snapshot capture and the
+    /// dirty-to-writeback transition happen while holding the page lock. Dirty
+    /// data that predates this operation is written back first.
+    ///
+    /// The caller must complete or invalidate the returned token after the
+    /// backend responds. The filesystem-level buffered-I/O lock must remain
+    /// held for the whole operation.
+    pub(crate) fn prepare_write_through(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        snapshot_writer: &mut VmWriter,
+    ) -> Result<PageCacheWriteThrough> {
+        let Some(vmo) = self.0.as_backed_vmo() else {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "write-through requires a page-cache backend"
+            );
+        };
+
+        vmo.prepare_write_through(offset, reader, snapshot_writer)
     }
 
     /// Evicts clean pages within the specified range from the page cache.
