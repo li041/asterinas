@@ -36,6 +36,7 @@ use crate::{
     prelude::*,
     thread::work_queue::{self, WorkPriority},
     time::clocks::MonotonicCoarseClock,
+    vm::page_cache::PageCache,
 };
 
 /// Use one page for each `FUSE_READDIR` request.
@@ -125,9 +126,9 @@ impl VirtioFsInode {
 
     /// Writes file data through the page cache.
     ///
-    /// Cached writes use write-through semantics: they copy user bytes into the
-    /// page cache, flush the dirtied range to the server, and commit metadata
-    /// only after writeback succeeds.
+    /// Cached writes use write-through semantics. Each request-sized chunk is
+    /// copied into both the page cache and one contiguous DMA buffer, then sent
+    /// to the server as one `FUSE_WRITE` before the write returns.
     pub(in crate::fs::fs_impls::virtiofs) fn cached_write_at(
         &self,
         write_offset: WriteOffset,
@@ -160,27 +161,32 @@ impl VirtioFsInode {
                 .expect("expanding the page cache should not fail");
         }
 
-        let mut write_through_page_cache = || -> Result<()> {
-            page_cache.write(offset, reader).map_err(Error::from)?;
-            page_cache.flush_range(offset..requested_end)
+        let write_result = self.do_cached_write(offset, reader, page_cache, fh, flags);
+        let written = match write_result {
+            Ok(written) => written,
+            Err(err) => {
+                if requested_end > old_size {
+                    page_cache.resize(old_size, requested_end)?;
+                    self.set_size(old_size);
+                }
+                return Err(err);
+            }
         };
 
-        if let Err(err) = write_through_page_cache() {
-            if requested_end > old_size {
-                // Roll back in truncate order: shrink the page cache before
-                // restoring the old visible EOF.
-                page_cache.resize(old_size, requested_end)?;
-                self.set_size(old_size);
-            }
-            return Err(err);
+        let committed_end = offset
+            .checked_add(written)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "virtiofs write size overflow"))?;
+        let new_size = old_size.max(committed_end);
+        if new_size < requested_end {
+            // A short write only commits the prefix accepted by the server.
+            page_cache.resize(new_size, requested_end)?;
+            self.set_size(new_size);
         }
 
-        let new_size = self.size().max(requested_end);
         let attr_version = self.fs_ref().session().bump_attr_version();
-
         inner.commit_local_write(new_size, attr_version);
 
-        Ok(write_len)
+        Ok(written)
     }
 
     /// Writes file data directly to the server.
@@ -225,6 +231,91 @@ impl VirtioFsInode {
             WriteOffset::Absolute(offset) => offset,
             WriteOffset::Append => self.size(),
         }
+    }
+
+    fn do_cached_write(
+        &self,
+        offset: usize,
+        reader: &mut VmReader,
+        page_cache: &PageCache,
+        fh: FuseFileHandle,
+        flags: u32,
+    ) -> Result<usize> {
+        let max_write = self.fs_ref().session().max_write() as usize;
+        let mut total_written = 0usize;
+
+        while reader.has_remain() {
+            let write_size = reader.remain().min(max_write);
+            let write_offset = offset + total_written;
+            let written = match self.write_cached_chunk(
+                write_offset,
+                write_size,
+                reader,
+                page_cache,
+                fh,
+                flags,
+            ) {
+                Ok(written) => written,
+                Err(_) if total_written > 0 => break,
+                Err(err) => return Err(err),
+            };
+
+            reader.skip(written);
+            total_written += written;
+            if written < write_size {
+                break;
+            }
+        }
+
+        Ok(total_written)
+    }
+
+    fn write_cached_chunk(
+        &self,
+        offset: usize,
+        write_size: usize,
+        reader: &VmReader,
+        page_cache: &PageCache,
+        fh: FuseFileHandle,
+        flags: u32,
+    ) -> Result<usize> {
+        let fs = self.fs_ref();
+        let data_buf = fs.session().alloc_write_buf(write_size)?;
+        let mut user_reader = reader.clone();
+        user_reader.limit(write_size);
+        let mut data_writer = data_buf.writer().unwrap().to_fallible();
+        let write_through =
+            page_cache.prepare_write_through(offset, &mut user_reader, &mut data_writer)?;
+        let write_result = fs.session().write(
+            self.nodeid(),
+            WriteReq::new(
+                fh,
+                offset as u64,
+                write_size as u32,
+                flags,
+                WriteFlags::empty(),
+            ),
+            data_buf,
+        );
+
+        let written = match write_result {
+            Ok(written) if written == write_size => {
+                write_through.complete();
+                return Ok(written);
+            }
+            Ok(written) => written,
+            Err(err) => {
+                write_through.invalidate();
+                return Err(err.into());
+            }
+        };
+
+        write_through.invalidate();
+        if written == 0 {
+            return_errno_with_message!(Errno::EIO, "virtiofs cached write made no progress");
+        }
+
+        Ok(written)
     }
 
     pub(super) fn open_transient_handle(

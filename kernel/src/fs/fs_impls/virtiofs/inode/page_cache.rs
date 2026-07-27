@@ -124,7 +124,7 @@ impl PageCacheBackend for VirtioFsInode {
             page_start as u64,
             writeback_len as u32,
             handle.file_flags(),
-            WriteFlags::empty(),
+            WriteFlags::WRITE_CACHE,
         );
 
         let complete_fn = move |status| {
