@@ -18,7 +18,7 @@ use aster_block::{
     bio::{BioEnqueueError, BioStatus, BioType, SubmittedBio, bio_segment_pool_init},
     request_queue::{BioRequest, BioRequestSingleQueue},
 };
-use aster_util::mem_obj_slice::Slice;
+use aster_util::mem_obj_slice::{DmaStreamSliceRef, Slice};
 use device_id::{DeviceId, MinorId};
 use ostd::{
     arch::trap::TrapFrame,
@@ -371,16 +371,17 @@ impl DeviceInner {
         };
 
         let outputs = {
-            let mut outputs: Vec<&Slice<_>> = Vec::with_capacity(bio_request.num_segments() + 1);
+            let mut outputs = Vec::with_capacity(bio_request.num_segments() + 1);
             let dma_slices_iter = bio_request.bios().flat_map(|bio| {
                 bio.segments()
                     .iter()
                     .map(|segment| segment.inner_dma_slice())
             });
             outputs.extend(dma_slices_iter);
-            outputs.push(&resp_slice);
+            outputs.push(DmaStreamSliceRef::FromAndToDevice(&resp_slice));
             outputs
         };
+        let output_refs: Vec<&DmaStreamSliceRef<'_>> = outputs.iter().collect();
 
         let num_used_descs = outputs.len() + 1;
         // FIXME: Split the request if it is too big
@@ -394,7 +395,7 @@ impl DeviceInner {
                 continue;
             }
             let token = queue
-                .add_dma_bufs(&[&req_slice], outputs.as_slice())
+                .add_dma_bufs(&[&req_slice], output_refs.as_slice())
                 .expect("add queue failed");
             if queue.should_notify() {
                 queue.notify();
@@ -439,8 +440,8 @@ impl DeviceInner {
         };
 
         let inputs = {
-            let mut inputs: Vec<&Slice<_>> = Vec::with_capacity(bio_request.num_segments() + 1);
-            inputs.push(&req_slice);
+            let mut inputs = Vec::with_capacity(bio_request.num_segments() + 1);
+            inputs.push(DmaStreamSliceRef::FromAndToDevice(&req_slice));
             let dma_slices_iter = bio_request.bios().flat_map(|bio| {
                 bio.segments()
                     .iter()
@@ -452,6 +453,7 @@ impl DeviceInner {
             }
             inputs
         };
+        let input_refs: Vec<&DmaStreamSliceRef<'_>> = inputs.iter().collect();
 
         let num_used_descs = inputs.len() + 1;
         // FIXME: Split the request if it is too big
@@ -464,7 +466,7 @@ impl DeviceInner {
                 continue;
             }
             let token = queue
-                .add_dma_bufs(inputs.as_slice(), &[&resp_slice])
+                .add_dma_bufs(input_refs.as_slice(), &[&resp_slice])
                 .expect("add queue failed");
             if queue.should_notify() {
                 queue.notify();

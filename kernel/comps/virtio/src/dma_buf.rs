@@ -3,7 +3,7 @@
 use alloc::sync::Arc;
 
 use aster_network::{RxBuffer, TxBuffer, dma_pool::DmaSegment};
-use aster_util::mem_obj_slice::Slice;
+use aster_util::mem_obj_slice::{DmaStreamSliceRef, Slice};
 use ostd::mm::{
     HasDaddr, HasSize,
     dma::{DmaCoherent, DmaDirection, DmaStream},
@@ -16,6 +16,12 @@ use ostd::mm::{
 pub trait DmaBuf: HasDaddr {
     /// The length of Dma area, in bytes
     fn len(&self) -> usize;
+}
+
+impl DmaBuf for DmaStreamSliceRef<'_> {
+    fn len(&self) -> usize {
+        self.size()
+    }
 }
 
 macro_rules! impl_dma_buf_for {

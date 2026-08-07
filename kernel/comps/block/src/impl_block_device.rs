@@ -261,7 +261,13 @@ impl dyn BlockDevice {
     fn read_sector_for_write(&self, sector_offset: usize) -> ostd::Result<BioSegment> {
         // The segment will be submitted by the later write bio, so keep it writable
         // from the CPU side and read the preserved sector directly into it.
-        let write_segment = alloc_write_segment(sector_offset, SECTOR_SIZE);
+        let write_segment = BioSegment::alloc_inner(
+            1,
+            sector_offset % BLOCK_SIZE,
+            SECTOR_SIZE,
+            BioDirection::FromAndToDevice,
+        );
+
         let read_bio = Bio::new(
             BioType::Read,
             Sid::from_offset(sector_offset),

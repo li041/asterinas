@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 use align_ext::AlignExt;
 use aster_util::{
     dma_arena::{DmaArenaAllocator, DmaArenaSlice},
-    mem_obj_slice::Slice,
+    mem_obj_slice::{DmaStreamSliceRef, Slice},
 };
 use int_to_c_enum::TryFromInt;
 use io_util::{
@@ -16,7 +16,7 @@ use ostd::{
     Error,
     mm::{
         HasSize, Infallible, USegment, VmReader, VmWriter,
-        dma::{DmaStream, FromAndToDevice},
+        dma::{DmaDirection, DmaStream, FromAndToDevice, FromDevice, ToDevice},
         io::util::{HasVmReaderWriter, VmReaderWriterResult},
     },
     sync::WaitQueue,
@@ -376,16 +376,35 @@ pub struct BioSegment {
 #[derive(Debug)]
 struct BioSegmentInner {
     storage: BioSegmentStorage,
-    direction: BioDirection,
 }
 
 /// The DMA storage owned by a [`BioSegment`].
 #[derive(Debug)]
 enum BioSegmentStorage {
+    /// A buffer that the device fills and the kernel reads.
+    FromDevice(BioSegmentStorageInner<FromDevice>),
+    /// A buffer that the kernel fills and the device reads.
+    ToDevice(BioSegmentStorageInner<ToDevice>),
+    /// A buffer reused for both read-modify-write directions.
+    FromAndToDevice(BioSegmentStorageInner<FromAndToDevice>),
+}
+
+/// The storage implementation shared by independent and arena-backed buffers.
+#[derive(Debug)]
+enum BioSegmentStorageInner<D: DmaDirection> {
     /// An independently allocated or mapped DMA stream.
-    Stream(Slice<Arc<DmaStream>>),
+    Stream(Slice<Arc<DmaStream<D>>>),
     /// A slice that retains an allocation from a shared DMA arena.
-    Arena(DmaArenaSlice<FromAndToDevice>),
+    Arena(DmaArenaSlice<D>),
+}
+
+impl<D: DmaDirection> BioSegmentStorageInner<D> {
+    fn dma_slice(&self) -> &Slice<Arc<DmaStream<D>>> {
+        match self {
+            Self::Stream(dma_slice) => dma_slice,
+            Self::Arena(arena_slice) => arena_slice.dma_slice(),
+        }
+    }
 }
 
 /// The direction of a bio request.
@@ -395,6 +414,8 @@ pub enum BioDirection {
     FromDevice,
     /// Write to the backed block device.
     ToDevice,
+    /// A buffer reused for both reading and writing the backed block device.
+    FromAndToDevice,
 }
 
 impl BioSegment {
@@ -429,19 +450,25 @@ impl BioSegment {
                 && offset + len <= nblocks * BLOCK_SIZE
         );
 
-        // The target segment is whether from the pool or newly-allocated
-        let bio_segment_inner = target_pool(direction)
-            .and_then(|pool| pool.alloc(nblocks, offset, len))
-            .unwrap_or_else(|| {
-                let dma_stream = DmaStream::alloc_uninit(nblocks, false).unwrap();
-                BioSegmentInner {
-                    storage: BioSegmentStorage::Stream(Slice::new(
-                        Arc::new(dma_stream),
-                        offset..offset + len,
-                    )),
-                    direction,
-                }
-            });
+        // Prefer the direction-specific arena, and fall back to an independent stream.
+        let storage = match direction {
+            BioDirection::FromDevice => BioSegmentStorage::FromDevice(alloc_storage(
+                BIO_SEGMENT_RPOOL.get(),
+                nblocks,
+                offset,
+                len,
+            )),
+            BioDirection::ToDevice => BioSegmentStorage::ToDevice(alloc_storage(
+                BIO_SEGMENT_WPOOL.get(),
+                nblocks,
+                offset,
+                len,
+            )),
+            BioDirection::FromAndToDevice => {
+                BioSegmentStorage::FromAndToDevice(alloc_storage(None, nblocks, offset, len))
+            }
+        };
+        let bio_segment_inner = BioSegmentInner { storage };
 
         Self {
             inner: Arc::new(bio_segment_inner),
@@ -451,12 +478,28 @@ impl BioSegment {
     /// Constructs a new `BioSegment` with a given `USegment` and the bio direction.
     pub fn new_from_segment(segment: USegment, direction: BioDirection) -> Self {
         let len = segment.size();
-        let dma_stream = DmaStream::map(segment, false).unwrap();
+        let storage = match direction {
+            BioDirection::FromDevice => {
+                BioSegmentStorage::FromDevice(BioSegmentStorageInner::Stream(Slice::new(
+                    Arc::new(DmaStream::<FromDevice>::map(segment, false).unwrap()),
+                    0..len,
+                )))
+            }
+            BioDirection::ToDevice => {
+                BioSegmentStorage::ToDevice(BioSegmentStorageInner::Stream(Slice::new(
+                    Arc::new(DmaStream::<ToDevice>::map(segment, false).unwrap()),
+                    0..len,
+                )))
+            }
+            BioDirection::FromAndToDevice => {
+                BioSegmentStorage::FromAndToDevice(BioSegmentStorageInner::Stream(Slice::new(
+                    Arc::new(DmaStream::<FromAndToDevice>::map(segment, false).unwrap()),
+                    0..len,
+                )))
+            }
+        };
         Self {
-            inner: Arc::new(BioSegmentInner {
-                storage: BioSegmentStorage::Stream(Slice::new(Arc::new(dma_stream), 0..len)),
-                direction,
-            }),
+            inner: Arc::new(BioSegmentInner { storage }),
         }
     }
 
@@ -477,20 +520,20 @@ impl BioSegment {
 
     /// Returns the offset (in bytes) within the first block.
     pub fn offset_within_first_block(&self) -> usize {
-        self.inner.dma_slice().offset().start % BLOCK_SIZE
+        match &self.inner.storage {
+            BioSegmentStorage::FromDevice(storage) => {
+                storage.dma_slice().offset().start % BLOCK_SIZE
+            }
+            BioSegmentStorage::ToDevice(storage) => storage.dma_slice().offset().start % BLOCK_SIZE,
+            BioSegmentStorage::FromAndToDevice(storage) => {
+                storage.dma_slice().offset().start % BLOCK_SIZE
+            }
+        }
     }
 
     /// Returns the inner DMA slice.
-    pub fn inner_dma_slice(&self) -> &Slice<Arc<DmaStream>> {
+    pub fn inner_dma_slice(&self) -> DmaStreamSliceRef<'_> {
         self.inner.dma_slice()
-    }
-
-    /// Returns the inner DMA object.
-    ///
-    /// Note that the slicing will be ignored. This is only for testing.
-    #[cfg(ktest)]
-    pub fn inner_dma(&self) -> &Arc<DmaStream> {
-        self.inner.dma_slice().mem_obj()
     }
 }
 
@@ -498,44 +541,59 @@ impl HasVmReaderWriter for BioSegment {
     type Types = VmReaderWriterResult;
 
     fn reader(&self) -> Result<VmReader<'_, Infallible>, Error> {
-        if self.inner.direction != BioDirection::FromDevice {
-            return Err(Error::AccessDenied);
-        }
-        self.inner.dma_slice().reader()
+        self.inner.reader()
     }
 
     fn writer(&self) -> Result<VmWriter<'_, Infallible>, Error> {
-        if self.inner.direction != BioDirection::ToDevice {
-            return Err(Error::AccessDenied);
-        }
-        self.inner.dma_slice().writer()
+        self.inner.writer()
     }
 }
 
 impl BioSegmentInner {
-    fn dma_slice(&self) -> &Slice<Arc<DmaStream>> {
+    fn dma_slice(&self) -> DmaStreamSliceRef<'_> {
         match &self.storage {
-            BioSegmentStorage::Stream(dma_slice) => dma_slice,
-            BioSegmentStorage::Arena(arena_slice) => arena_slice.dma_slice(),
+            BioSegmentStorage::FromDevice(storage) => {
+                DmaStreamSliceRef::FromDevice(storage.dma_slice())
+            }
+            BioSegmentStorage::ToDevice(storage) => {
+                DmaStreamSliceRef::ToDevice(storage.dma_slice())
+            }
+            BioSegmentStorage::FromAndToDevice(storage) => {
+                DmaStreamSliceRef::FromAndToDevice(storage.dma_slice())
+            }
+        }
+    }
+
+    fn reader(&self) -> Result<VmReader<'_, Infallible>, Error> {
+        match &self.storage {
+            BioSegmentStorage::FromDevice(storage) => storage.dma_slice().reader(),
+            BioSegmentStorage::ToDevice(storage) => storage.dma_slice().reader(),
+            BioSegmentStorage::FromAndToDevice(storage) => storage.dma_slice().reader(),
+        }
+    }
+
+    fn writer(&self) -> Result<VmWriter<'_, Infallible>, Error> {
+        match &self.storage {
+            BioSegmentStorage::FromDevice(storage) => storage.dma_slice().writer(),
+            BioSegmentStorage::ToDevice(storage) => storage.dma_slice().writer(),
+            BioSegmentStorage::FromAndToDevice(storage) => storage.dma_slice().writer(),
         }
     }
 }
 
 /// A BIO-specific wrapper around a shared DMA arena.
-struct BioSegmentPool {
-    arena_allocator: Arc<DmaArenaAllocator<FromAndToDevice>>,
-    direction: BioDirection,
+struct BioSegmentPool<D: DmaDirection> {
+    arena_allocator: Arc<DmaArenaAllocator<D>>,
 }
 
-impl BioSegmentPool {
-    /// Creates a new pool given the bio direction. The total number of
-    /// managed blocks is currently set to `POOL_DEFAULT_NBLOCKS`.
+impl<D: DmaDirection> BioSegmentPool<D> {
+    /// Creates a new direction-specific pool. The total number of managed
+    /// blocks is currently set to `POOL_DEFAULT_NBLOCKS`.
     ///
     /// The new pool will be allocated and mapped for later allocation.
-    pub fn new(direction: BioDirection) -> Self {
+    pub fn new() -> Self {
         Self {
-            arena_allocator: DmaArenaAllocator::new(POOL_DEFAULT_NBLOCKS).unwrap(),
-            direction,
+            arena_allocator: DmaArenaAllocator::<D>::new(POOL_DEFAULT_NBLOCKS).unwrap(),
         }
     }
 
@@ -559,7 +617,7 @@ impl BioSegmentPool {
         nblocks: usize,
         offset_within_first_block: usize,
         len: usize,
-    ) -> Option<BioSegmentInner> {
+    ) -> Option<BioSegmentStorageInner<D>> {
         assert!(
             offset_within_first_block < BLOCK_SIZE
                 && offset_within_first_block + len <= nblocks * BLOCK_SIZE
@@ -568,32 +626,34 @@ impl BioSegmentPool {
         let arena = self.arena_allocator.alloc(nblocks)?;
         let arena_slice =
             arena.into_slice(offset_within_first_block..offset_within_first_block + len);
-        Some(BioSegmentInner {
-            storage: BioSegmentStorage::Arena(arena_slice),
-            direction: self.direction,
-        })
+        Some(BioSegmentStorageInner::Arena(arena_slice))
     }
 }
 
 /// A pool of segments for read bio requests only.
-static BIO_SEGMENT_RPOOL: Once<Arc<BioSegmentPool>> = Once::new();
+static BIO_SEGMENT_RPOOL: Once<Arc<BioSegmentPool<FromDevice>>> = Once::new();
 /// A pool of segments for write bio requests only.
-static BIO_SEGMENT_WPOOL: Once<Arc<BioSegmentPool>> = Once::new();
+static BIO_SEGMENT_WPOOL: Once<Arc<BioSegmentPool<ToDevice>>> = Once::new();
 /// The default number of blocks in each pool. (16MB each for now)
 const POOL_DEFAULT_NBLOCKS: usize = 4096;
 
 /// Initializes the bio segment pool.
 pub fn bio_segment_pool_init() {
-    BIO_SEGMENT_RPOOL.call_once(|| Arc::new(BioSegmentPool::new(BioDirection::FromDevice)));
-    BIO_SEGMENT_WPOOL.call_once(|| Arc::new(BioSegmentPool::new(BioDirection::ToDevice)));
+    BIO_SEGMENT_RPOOL.call_once(|| Arc::new(BioSegmentPool::<FromDevice>::new()));
+    BIO_SEGMENT_WPOOL.call_once(|| Arc::new(BioSegmentPool::<ToDevice>::new()));
 }
 
-/// Gets the target pool with the given `direction`.
-fn target_pool(direction: BioDirection) -> Option<&'static Arc<BioSegmentPool>> {
-    match direction {
-        BioDirection::FromDevice => BIO_SEGMENT_RPOOL.get(),
-        BioDirection::ToDevice => BIO_SEGMENT_WPOOL.get(),
-    }
+fn alloc_storage<D: DmaDirection>(
+    pool: Option<&Arc<BioSegmentPool<D>>>,
+    nblocks: usize,
+    offset: usize,
+    len: usize,
+) -> BioSegmentStorageInner<D> {
+    pool.and_then(|pool| pool.alloc(nblocks, offset, len))
+        .unwrap_or_else(|| {
+            let dma_stream = DmaStream::<D>::alloc_uninit(nblocks, false).unwrap();
+            BioSegmentStorageInner::Stream(Slice::new(Arc::new(dma_stream), offset..offset + len))
+        })
 }
 
 /// Checks if the given offset is aligned to sector.

@@ -12,10 +12,13 @@
 use alloc::sync::Arc;
 use core::{borrow::Borrow, fmt::Debug, ops::Range};
 
-use ostd::mm::{
-    HasDaddr, HasPaddr, HasSize, Infallible, VmReader, VmWriter,
-    dma::DmaStream,
-    io::util::{HasVmReaderWriter, VmReaderWriterResult},
+use ostd::{
+    Error,
+    mm::{
+        HasDaddr, HasPaddr, HasSize, Infallible, VmReader, VmWriter,
+        dma::{DmaStream, FromAndToDevice, FromDevice, ToDevice},
+        io::util::{HasVmReaderWriter, VmReaderWriterResult},
+    },
 };
 
 macro_rules! assert_in_range {
@@ -30,6 +33,79 @@ macro_rules! assert_in_range {
 pub struct Slice<MemObj> {
     inner: MemObj,
     offset: Range<usize>,
+}
+
+/// A borrowed view of a streaming DMA slice with its direction preserved.
+#[derive(Clone, Copy, Debug)]
+pub enum DmaStreamSliceRef<'a> {
+    /// A slice that can be read by the kernel after device access.
+    FromDevice(&'a Slice<Arc<DmaStream<FromDevice>>>),
+    /// A slice that can be written by the kernel before device access.
+    ToDevice(&'a Slice<Arc<DmaStream<ToDevice>>>),
+    /// A slice that supports both device directions.
+    FromAndToDevice(&'a Slice<Arc<DmaStream<FromAndToDevice>>>),
+}
+
+impl HasSize for DmaStreamSliceRef<'_> {
+    fn size(&self) -> usize {
+        match self {
+            Self::FromDevice(slice) => slice.size(),
+            Self::ToDevice(slice) => slice.size(),
+            Self::FromAndToDevice(slice) => slice.size(),
+        }
+    }
+}
+
+impl HasDaddr for DmaStreamSliceRef<'_> {
+    fn daddr(&self) -> ostd::mm::Daddr {
+        match self {
+            Self::FromDevice(slice) => slice.daddr(),
+            Self::ToDevice(slice) => slice.daddr(),
+            Self::FromAndToDevice(slice) => slice.daddr(),
+        }
+    }
+}
+
+impl HasVmReaderWriter for DmaStreamSliceRef<'_> {
+    type Types = VmReaderWriterResult;
+
+    fn reader(&self) -> Result<VmReader<'_, Infallible>, Error> {
+        match self {
+            Self::FromDevice(slice) => slice.reader(),
+            Self::ToDevice(slice) => slice.reader(),
+            Self::FromAndToDevice(slice) => slice.reader(),
+        }
+    }
+
+    fn writer(&self) -> Result<VmWriter<'_, Infallible>, Error> {
+        match self {
+            Self::FromDevice(slice) => slice.writer(),
+            Self::ToDevice(slice) => slice.writer(),
+            Self::FromAndToDevice(slice) => slice.writer(),
+        }
+    }
+}
+
+impl DmaStreamSliceRef<'_> {
+    /// Synchronizes the slice from the device into memory.
+    pub fn sync_from_device(&self) -> Result<(), Error> {
+        match self {
+            Self::FromDevice(slice) => slice.mem_obj().sync_from_device(slice.offset().clone()),
+            Self::ToDevice(_) => Err(Error::AccessDenied),
+            Self::FromAndToDevice(slice) => {
+                slice.mem_obj().sync_from_device(slice.offset().clone())
+            }
+        }
+    }
+
+    /// Synchronizes the slice from memory to the device.
+    pub fn sync_to_device(&self) -> Result<(), Error> {
+        match self {
+            Self::FromDevice(_) => Err(Error::AccessDenied),
+            Self::ToDevice(slice) => slice.mem_obj().sync_to_device(slice.offset().clone()),
+            Self::FromAndToDevice(slice) => slice.mem_obj().sync_to_device(slice.offset().clone()),
+        }
+    }
 }
 
 impl<MemObj: HasSize> HasSize for Slice<MemObj> {
