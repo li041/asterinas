@@ -23,7 +23,10 @@ use device_id::{DeviceId, MinorId};
 use ostd::{
     arch::trap::TrapFrame,
     debug, info,
-    mm::{PAGE_SIZE, VmIo, dma::DmaStream},
+    mm::{
+        PAGE_SIZE, VmIo,
+        dma::{DmaStream, FromDevice, ToDevice},
+    },
     sync::SpinLock,
 };
 
@@ -200,8 +203,8 @@ struct DeviceInner {
     features: BlockFeatures,
     queue: SpinLock<VirtQueue>,
     transport: SpinLock<DeviceTransport>,
-    block_requests: Arc<DmaStream>,
-    block_responses: Arc<DmaStream>,
+    block_requests: Arc<DmaStream<ToDevice>>,
+    block_responses: Arc<DmaStream<FromDevice>>,
     id_allocator: SyncIdAlloc,
     submitted_requests: SpinLock<BTreeMap<u16, SubmittedRequest>>,
 }
@@ -244,10 +247,13 @@ impl DeviceInner {
 
         let queue = VirtQueue::new(0, Self::QUEUE_SIZE, device_transport.as_mut())?;
 
-        let block_requests =
-            Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
-        let block_responses =
-            Arc::new(DmaStream::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?);
+        let block_requests = Arc::new(
+            DmaStream::<ToDevice>::alloc(1, false).map_err(VirtioDeviceError::ResourceAlloc)?,
+        );
+        let block_responses = Arc::new(
+            DmaStream::<FromDevice>::alloc_uninit(1, false)
+                .map_err(VirtioDeviceError::ResourceAlloc)?,
+        );
         const {
             assert!(Self::QUEUE_SIZE as usize * REQ_SIZE <= PAGE_SIZE);
             assert!(Self::QUEUE_SIZE as usize * RESP_SIZE <= PAGE_SIZE);
@@ -360,15 +366,10 @@ impl DeviceInner {
             req_slice
         };
 
-        let resp_slice = {
-            let resp_slice = Slice::new(
-                self.block_responses.clone(),
-                id * RESP_SIZE..(id + 1) * RESP_SIZE,
-            );
-            resp_slice.write_val(0, &BlockResp::default()).unwrap();
-            resp_slice.sync_to_device().unwrap();
-            resp_slice
-        };
+        let resp_slice = Slice::new(
+            self.block_responses.clone(),
+            id * RESP_SIZE..(id + 1) * RESP_SIZE,
+        );
 
         let outputs = {
             let mut outputs = Vec::with_capacity(bio_request.num_segments() + 1);
@@ -378,7 +379,7 @@ impl DeviceInner {
                     .map(|segment| segment.inner_dma_slice())
             });
             outputs.extend(dma_slices_iter);
-            outputs.push(DmaStreamSliceRef::FromAndToDevice(&resp_slice));
+            outputs.push(DmaStreamSliceRef::FromDevice(&resp_slice));
             outputs
         };
         let output_refs: Vec<&DmaStreamSliceRef<'_>> = outputs.iter().collect();
@@ -429,19 +430,14 @@ impl DeviceInner {
             req_slice
         };
 
-        let resp_slice = {
-            let resp_slice = Slice::new(
-                self.block_responses.clone(),
-                id * RESP_SIZE..(id + 1) * RESP_SIZE,
-            );
-            resp_slice.write_val(0, &BlockResp::default()).unwrap();
-            resp_slice.sync_to_device().unwrap();
-            resp_slice
-        };
+        let resp_slice = Slice::new(
+            self.block_responses.clone(),
+            id * RESP_SIZE..(id + 1) * RESP_SIZE,
+        );
 
         let inputs = {
             let mut inputs = Vec::with_capacity(bio_request.num_segments() + 1);
-            inputs.push(DmaStreamSliceRef::FromAndToDevice(&req_slice));
+            inputs.push(DmaStreamSliceRef::ToDevice(&req_slice));
             let dma_slices_iter = bio_request.bios().flat_map(|bio| {
                 bio.segments()
                     .iter()
@@ -505,13 +501,7 @@ impl DeviceInner {
             req_slice
         };
 
-        let resp_slice = {
-            let resp_slice =
-                Slice::new(&self.block_responses, id * RESP_SIZE..(id + 1) * RESP_SIZE);
-            resp_slice.write_val(0, &BlockResp::default()).unwrap();
-            resp_slice.sync_to_device().unwrap();
-            resp_slice
-        };
+        let resp_slice = Slice::new(&self.block_responses, id * RESP_SIZE..(id + 1) * RESP_SIZE);
 
         // One descriptor for the input `req_slice`, one for the output `resp_slice`.
         let num_used_descs = 2;
@@ -570,11 +560,3 @@ struct BlockResp {
 }
 
 const RESP_SIZE: usize = size_of::<BlockResp>();
-
-impl Default for BlockResp {
-    fn default() -> Self {
-        Self {
-            status: RespStatus::_NotReady as _,
-        }
-    }
-}

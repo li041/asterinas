@@ -61,8 +61,6 @@ enum RespStatus {
     IoErr = 1,
     /// Unsupported yet.
     Unsupported = 2,
-    /// Not ready.
-    _NotReady = 3,
 }
 
 #[padding_struct]
