@@ -9,14 +9,11 @@ RESULT_ROOT=${POC_RESULT_ROOT:-${ASTERINAS_DIR}/benchmark_results/virtiofs-read-
 SHARED_DIR=${POC_SHARED_DIR:-${ASTERINAS_DIR}/test/initramfs/build/virtiofs-read-poc}
 VIRTIOFSD_BIN=${VIRTIOFSD_BIN:-/usr/libexec/virtiofsd}
 VIRTIOFS_SOCKET=${VIRTIOFS_SOCKET:-/tmp/vhostqemu/virtiofs-read-poc.sock}
-POC_REPEATS=${POC_REPEATS:-1}
 POC_MEM=${POC_MEM:-8G}
 POC_SMP=${POC_SMP:-1}
 
-if ! [[ "$POC_REPEATS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "POC_REPEATS must be a positive integer" >&2
-    exit 2
-fi
+ALL_VARIANTS=(baseline cached_batch_256 cached_skip_copy direct_skip_copy)
+
 if [ ! -x "$VIRTIOFSD_BIN" ]; then
     echo "virtiofsd not found at $VIRTIOFSD_BIN" >&2
     exit 2
@@ -45,17 +42,44 @@ cleanup_virtiofsd() {
 }
 trap cleanup_virtiofsd EXIT
 
+bandwidth_to_mb_per_sec() {
+    local value=$1
+    local unit=$2
+
+    awk -v value="$value" -v unit="$unit" 'BEGIN {
+        factor["B/s"] = 0.000001;
+        factor["KB/s"] = 0.001;
+        factor["MB/s"] = 1;
+        factor["GB/s"] = 1000;
+        factor["KiB/s"] = 1024 / 1000000;
+        factor["MiB/s"] = 1048576 / 1000000;
+        factor["GiB/s"] = 1073741824 / 1000000;
+        printf "%.6f\n", value * factor[unit];
+    }'
+}
+
+extract_bandwidth() {
+    local output_file=$1
+    local occurrence=$2
+    local bandwidth
+
+    bandwidth=$(sed -n 's/.*READ: bw=\([0-9.]*\)\([KMGT]*i*B\/s\).*/\1 \2/p' \
+        "$output_file" | sed -n "${occurrence}p")
+    if [ -z "$bandwidth" ]; then
+        echo "failed to extract read bandwidth from benchmark output" >&2
+        exit 1
+    fi
+
+    bandwidth_to_mb_per_sec $bandwidth
+}
+
 run_variant() {
     local variant=$1
     local kernel_args=$2
-    local run_index=$3
-    local run_dir=${RESULT_ROOT}/${variant}/run-${run_index}
-    local guest_result_dir=${SHARED_DIR}/poc-results
+    local output_file
+    output_file=$(mktemp)
 
-    mkdir -p "$run_dir" "$guest_result_dir"
-    rm -f "${guest_result_dir}/cached.json" "${guest_result_dir}/direct.json"
-
-    echo "=== ${variant}, run ${run_index}/${POC_REPEATS} ==="
+    echo "=== ${variant} ==="
     make -C "$ASTERINAS_DIR" run_kernel \
         BENCHMARK=fio/seq_read_bw/virtiofs_poc \
         EXTRA_KCMD_ARGS="$kernel_args" \
@@ -63,61 +87,61 @@ run_variant() {
         NETDEV=tap VHOST=on VIRTIOFS=on \
         VIRTIOFS_SOCKET="$VIRTIOFS_SOCKET" \
         VIRTIOFS_SHARED_DIR="$SHARED_DIR" \
-        VIRTIOFSD="$VIRTIOFSD_BIN"
+        VIRTIOFSD="$VIRTIOFSD_BIN" | tee "$output_file"
 
-    for mode in cached direct; do
-        local source_json=${guest_result_dir}/${mode}.json
-        if [ ! -f "$source_json" ]; then
-            echo "missing fio result: $source_json" >&2
-            exit 1
-        fi
-        jq empty "$source_json"
-        cp "$source_json" "${run_dir}/${mode}.json"
-    done
+    local cached_bandwidth
+    local direct_bandwidth
+    cached_bandwidth=$(extract_bandwidth "$output_file" 1)
+    direct_bandwidth=$(extract_bandwidth "$output_file" 2)
+    rm -f "$output_file"
 
     jq -n \
-        --arg variant "$variant" \
-        --arg kernel_args "$kernel_args" \
-        --arg commit "$(git -C "$ASTERINAS_DIR" rev-parse HEAD)" \
-        --arg collected_at "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
-        --arg memory "$POC_MEM" \
-        --argjson smp "$POC_SMP" \
-        --arg virtiofsd_version "$($VIRTIOFSD_BIN --version 2>&1 | head -n 1)" \
-        --slurpfile cached "${run_dir}/cached.json" \
-        --slurpfile direct "${run_dir}/direct.json" \
-        '{
-            variant: $variant,
-            kernel_args: $kernel_args,
-            commit: $commit,
-            collected_at: $collected_at,
-            memory: $memory,
-            smp: $smp,
-            virtiofsd: $virtiofsd_version,
-            cached: {
-                bandwidth_bytes_per_sec: $cached[0].jobs[0].read.bw_bytes,
-                iops: $cached[0].jobs[0].read.iops,
-                runtime_ms: $cached[0].jobs[0].read.runtime,
-                mean_completion_latency_ns: $cached[0].jobs[0].read.clat_ns.mean
+        --argjson cached "$cached_bandwidth" \
+        --argjson direct "$direct_bandwidth" \
+        '[
+            {
+                name: "Cached read bandwidth on Asterinas",
+                unit: "MB/s",
+                value: $cached,
+                extra: "cached"
             },
-            direct: {
-                bandwidth_bytes_per_sec: $direct[0].jobs[0].read.bw_bytes,
-                iops: $direct[0].jobs[0].read.iops,
-                runtime_ms: $direct[0].jobs[0].read.runtime,
-                mean_completion_latency_ns: $direct[0].jobs[0].read.clat_ns.mean
+            {
+                name: "Direct read bandwidth on Asterinas",
+                unit: "MB/s",
+                value: $direct,
+                extra: "direct"
             }
-        }' > "${run_dir}/summary.json"
+        ]' > "${RESULT_ROOT}/${variant}.json"
 }
 
-for run_index in $(seq 1 "$POC_REPEATS"); do
-    run_variant baseline "" "$run_index"
-    run_variant cached_batch_256 "page_cache.poc_read_batch_pages=256" "$run_index"
-    run_variant cached_skip_copy "page_cache.poc_skip_read_copy" "$run_index"
-    run_variant direct_skip_copy "virtiofs.poc_skip_direct_read_copy" "$run_index"
+run_named_variant() {
+    case "$1" in
+        baseline)
+            run_variant baseline ""
+            ;;
+        cached_batch_256)
+            run_variant cached_batch_256 "page_cache.poc_read_batch_pages=256"
+            ;;
+        cached_skip_copy)
+            run_variant cached_skip_copy "page_cache.poc_skip_read_copy"
+            ;;
+        direct_skip_copy)
+            run_variant direct_skip_copy "virtiofs.poc_skip_direct_read_copy"
+            ;;
+        *)
+            echo "unknown variant: $1" >&2
+            echo "valid variants: ${ALL_VARIANTS[*]}" >&2
+            exit 2
+            ;;
+    esac
+}
+
+if [ "$#" -eq 0 ]; then
+    set -- "${ALL_VARIANTS[@]}"
+fi
+
+for variant in "$@"; do
+    run_named_variant "$variant"
 done
 
-find "$RESULT_ROOT" -mindepth 3 -maxdepth 3 -name summary.json -print0 | \
-    sort -z | xargs -0 jq -s \
-        --arg commit "$(git -C "$ASTERINAS_DIR" rev-parse HEAD)" \
-        '{commit: $commit, experiments: .}' > "${RESULT_ROOT}/summary.json"
-
-echo "Collected fio JSON under ${RESULT_ROOT}"
+echo "Collected bandwidth results under ${RESULT_ROOT}"
