@@ -369,6 +369,29 @@ pub trait PageCacheBackend: Sync + Send {
         io_batch: &mut IoBatch,
     ) -> Result<()>;
 
+    /// Reads consecutive pages from the backend asynchronously.
+    ///
+    /// `pages` must be non-empty and ordered by consecutive page indices. The
+    /// default implementation submits one operation per page. Backends that
+    /// support larger requests may override this method to populate the whole
+    /// run with fewer I/O operations.
+    fn read_pages_async(
+        &self,
+        pages: Vec<(usize, LockedCachePage)>,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        debug_assert!(
+            pages
+                .windows(2)
+                .all(|pair| pair[0].0.checked_add(1) == Some(pair[1].0))
+        );
+
+        for (idx, locked_page) in pages {
+            self.read_page_async(idx, locked_page, io_batch)?;
+        }
+        Ok(())
+    }
+
     /// Writes a page to the backend asynchronously.
     ///
     /// If the caller tries to pass an index that exceeds the size of the

@@ -5,10 +5,14 @@
 
 use alloc::vec;
 
-use ostd::{mm::VmIo, prelude::ktest};
+use io_util::batch::IoBatch;
+use ostd::{
+    mm::{VmIo, io::util::HasVmReaderWriter},
+    prelude::ktest,
+};
 
 use self::utils::{IoCompletion, IoKind, MockPageCacheBackend, wait_until};
-use super::{PageCache, PageCacheBackend, VmoCommitError};
+use super::{LockedCachePage, PageCache, PageCacheBackend, VmoCommitError};
 use crate::{prelude::*, thread::kernel_thread::ThreadOptions};
 
 mod utils;
@@ -17,6 +21,71 @@ mod utils;
 fn new_backend_page_cache(backend: &Arc<MockPageCacheBackend>, num_pages: usize) -> PageCache {
     let backend_dyn: Arc<dyn PageCacheBackend> = backend.clone();
     PageCache::new_with_backend(num_pages * PAGE_SIZE, Arc::downgrade(&backend_dyn)).unwrap()
+}
+
+#[derive(Debug)]
+struct BatchReadBackend {
+    submitted_batches: Mutex<Vec<Vec<usize>>>,
+}
+
+impl Default for BatchReadBackend {
+    fn default() -> Self {
+        Self {
+            submitted_batches: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl PageCacheBackend for BatchReadBackend {
+    fn read_page_async(
+        &self,
+        page_idx: usize,
+        locked_page: LockedCachePage,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        self.read_pages_async(vec![(page_idx, locked_page)], io_batch)
+    }
+
+    fn read_pages_async(
+        &self,
+        pages: Vec<(usize, LockedCachePage)>,
+        _io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        self.submitted_batches
+            .lock()
+            .push(pages.iter().map(|(page_idx, _)| *page_idx).collect());
+
+        for (_, locked_page) in pages {
+            locked_page.writer().fill_zeros(PAGE_SIZE);
+            locked_page.set_up_to_date();
+        }
+        Ok(())
+    }
+
+    fn write_page_async(
+        &self,
+        _page_idx: usize,
+        _locked_page: LockedCachePage,
+        _io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        return_errno!(Errno::EIO)
+    }
+}
+
+#[ktest]
+fn cold_multi_page_read_uses_one_backend_batch() {
+    const NUM_PAGES: usize = 4;
+
+    let backend = Arc::new(BatchReadBackend::default());
+    let backend_dyn: Arc<dyn PageCacheBackend> = backend.clone();
+    let page_cache =
+        PageCache::new_with_backend(NUM_PAGES * PAGE_SIZE, Arc::downgrade(&backend_dyn)).unwrap();
+
+    let mut read_buffer = vec![0xff; NUM_PAGES * PAGE_SIZE];
+    page_cache.read_bytes(0, &mut read_buffer).unwrap();
+
+    assert_eq!(&*backend.submitted_batches.lock(), &[vec![0, 1, 2, 3]]);
+    assert_eq!(read_buffer, vec![0; NUM_PAGES * PAGE_SIZE]);
 }
 
 /// Serializes a cold read and a later overwrite with the caller-provided

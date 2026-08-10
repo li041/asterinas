@@ -38,6 +38,8 @@ pub struct FuseSession {
     attr_version: AtomicU64,
     /// The maximum write size accepted by the server.
     max_write: u32,
+    /// The maximum number of pages accepted in one request.
+    max_pages: usize,
     /// The feature flags selected by `FUSE_INIT`.
     //
     // TODO: Apply negotiated `FUSE_INIT` flags to conduct virtio-fs behavior.
@@ -61,11 +63,18 @@ impl FuseSession {
         let init_reply = waiter.parse_reply::<InitOperation>(payload_len)?;
 
         let max_write = init_reply.max_write().max(MIN_MAX_WRITE);
+        let negotiated_flags = init_reply.flags();
+        let max_pages = if negotiated_flags.contains(FuseInitFlags::MAX_PAGES) {
+            usize::from(init_reply.max_pages().max(1))
+        } else {
+            1
+        };
         let session = Arc::new(Self {
             device,
             attr_version: AtomicU64::new(1),
             max_write,
-            negotiated_flags: init_reply.flags(),
+            max_pages,
+            negotiated_flags,
         });
 
         info!(
@@ -146,6 +155,11 @@ impl FuseSession {
     /// Returns the maximum write size accepted by the server.
     pub fn max_write(&self) -> u32 {
         self.max_write
+    }
+
+    /// Returns the maximum number of pages accepted in one request.
+    pub fn max_pages(&self) -> usize {
+        self.max_pages
     }
 
     fn init_flags() -> FuseInitFlags {

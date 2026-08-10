@@ -625,6 +625,12 @@ impl Vmo {
         commit_mode: CommitMode,
         pages: &mut Vec<(usize, CachePage)>,
     ) -> Result<()> {
+        if commit_mode == CommitMode::Read
+            && let Some(backed_vmo) = self.as_backed_vmo()
+        {
+            return backed_vmo.collect_read_pages(start_idx, end_idx, pages);
+        }
+
         let end_idx = end_idx.min(start_idx + pages.capacity());
         pages.clear();
         let range = (start_idx * PAGE_SIZE)..(end_idx * PAGE_SIZE);
@@ -690,6 +696,66 @@ pub struct BackedVmo<'a> {
 }
 
 impl<'a> BackedVmo<'a> {
+    /// Collects and initializes a bounded run of pages for buffered reads.
+    fn collect_read_pages(
+        &self,
+        start_idx: usize,
+        end_idx: usize,
+        pages: &mut Vec<(usize, CachePage)>,
+    ) -> Result<()> {
+        let end_idx = end_idx.min(start_idx + pages.capacity());
+        pages.clear();
+
+        let mut pending_runs = Vec::new();
+        let mut pending_run = Vec::new();
+        {
+            let mut locked_pages = self.pages.lock();
+            let mut cursor = locked_pages.cursor_mut(start_idx as u64);
+
+            for page_idx in start_idx..end_idx {
+                let page = if let Some(page) = cursor.load() {
+                    page.clone()
+                } else {
+                    let page = CachePage::alloc_uninit()?;
+                    cursor.store(page.clone());
+                    page
+                };
+
+                if page.is_uninit()
+                    && let Some(locked_page) = page.clone().try_lock()
+                    && locked_page.is_uninit()
+                {
+                    pending_run.push((page_idx, locked_page));
+                } else if !pending_run.is_empty() {
+                    pending_runs.push(core::mem::take(&mut pending_run));
+                }
+
+                pages.push((page_idx, page));
+                cursor.next();
+            }
+        }
+        if !pending_run.is_empty() {
+            pending_runs.push(pending_run);
+        }
+
+        let mut io_batch = IoBatch::with_capacity(pending_runs.len());
+        let mut submit_result = Ok(());
+        for pending_run in pending_runs {
+            if let Err(err) = self.backend.read_pages_async(pending_run, &mut io_batch) {
+                submit_result = Err(err);
+                break;
+            }
+        }
+        let wait_result = io_batch.wait_all().map_err(Error::from);
+        submit_result.and(wait_result)?;
+
+        for (page_idx, page) in pages.iter() {
+            page.ensure_init(|locked_page| self.backend.read_page(*page_idx, locked_page))?;
+        }
+
+        Ok(())
+    }
+
     /// Writes back dirty pages in the specified byte range to the backend storage.
     pub(super) fn flush_dirty_pages(&self, range: &Range<usize>) -> Result<()> {
         let locked_pages = self.vmo.pages.lock();

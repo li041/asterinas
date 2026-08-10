@@ -50,12 +50,10 @@ impl PageCacheBackend for VirtioFsInode {
                     idx,
                     payload_len
                 );
-            } else if payload_len < PAGE_SIZE {
+            } else {
                 let mut writer = cache_page.writer();
                 writer.skip(payload_len);
                 writer.fill_zeros(PAGE_SIZE - payload_len);
-                locked_page.set_up_to_date();
-            } else {
                 locked_page.set_up_to_date();
             }
             // Keep the handle alive until the request completes
@@ -70,6 +68,42 @@ impl PageCacheBackend for VirtioFsInode {
             }
             Err(err) => Err(err.into()),
         }
+    }
+
+    fn read_pages_async(
+        &self,
+        pages: Vec<(usize, LockedCachePage)>,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        if pages.is_empty() {
+            return_errno_with_message!(Errno::EINVAL, "empty virtiofs page read");
+        }
+        if pages.len() == 1 {
+            let (idx, locked_page) = pages
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::with_message(Errno::EINVAL, "empty virtiofs page read"))?;
+            return self.read_page_async(idx, locked_page, io_batch);
+        }
+
+        debug_assert!(!pages.is_empty());
+        debug_assert!(
+            pages
+                .windows(2)
+                .all(|pair| pair[0].0.checked_add(1) == Some(pair[1].0))
+        );
+
+        let max_pages = self.fs_ref().session().max_pages();
+        let mut pages = pages.into_iter();
+        loop {
+            let chunk = pages.by_ref().take(max_pages).collect::<Vec<_>>();
+            if chunk.is_empty() {
+                break;
+            }
+            self.submit_read_pages(chunk, io_batch)?;
+        }
+
+        Ok(())
     }
 
     fn write_page_async(
@@ -156,6 +190,79 @@ impl PageCacheBackend for VirtioFsInode {
 }
 
 impl VirtioFsInode {
+    fn submit_read_pages(
+        &self,
+        pages: Vec<(usize, LockedCachePage)>,
+        io_batch: &mut IoBatch,
+    ) -> Result<()> {
+        let first_page_idx = pages
+            .first()
+            .map(|(idx, _)| *idx)
+            .ok_or_else(|| Error::with_message(Errno::EINVAL, "empty virtiofs page read"))?;
+        let request_len = pages
+            .len()
+            .checked_mul(PAGE_SIZE)
+            .ok_or_else(|| Error::with_message(Errno::EOVERFLOW, "virtiofs read size overflow"))?;
+        let request_len = u32::try_from(request_len)
+            .map_err(|_| Error::with_message(Errno::EOVERFLOW, "virtiofs read size overflow"))?;
+
+        let handle = self.readable_page_handle()?;
+        let nodeid = self.nodeid();
+        let session = self.fs_ref().session().clone();
+        let data_buf = session.alloc_read_buf(request_len as usize)?;
+        let complete_data_buf = data_buf.clone();
+        // FIXME: Page-cache I/O should use the current `InodeHandle` status
+        // flags instead of the flags captured in the cached FUSE handle. The
+        // page-cache backend currently receives only the inode, so it cannot
+        // observe per-open status flag changes.
+        let read_req = ReadReq::new(
+            handle.fh(),
+            page_offset(first_page_idx)? as u64,
+            request_len,
+            handle.file_flags(),
+        );
+
+        let complete_fn = move |status| {
+            let FuseCompletion::Complete(payload_len) = status else {
+                return;
+            };
+
+            if payload_len > request_len as usize {
+                ostd::error!(
+                    "virtiofs read failed for page index {}; payload length {} exceeds request size {}",
+                    first_page_idx,
+                    payload_len,
+                    request_len
+                );
+                return;
+            }
+
+            let mut data_reader = complete_data_buf.reader().unwrap();
+            data_reader.limit(payload_len);
+            let mut remaining = payload_len;
+            for (_, locked_page) in pages {
+                let page_data_len = remaining.min(PAGE_SIZE);
+                let mut page_writer = locked_page.writer();
+                page_writer.limit(PAGE_SIZE);
+                let copied_len = page_writer.write(&mut data_reader);
+                debug_assert_eq!(copied_len, page_data_len);
+                page_writer.fill_zeros(PAGE_SIZE - page_data_len);
+                locked_page.set_up_to_date();
+                remaining -= page_data_len;
+            }
+            // Keep the handle alive until the request completes
+            // or until the completion closure is dropped on submission failure.
+            drop(handle);
+        };
+
+        match session.read_async(nodeid, read_req, data_buf, Some(Box::new(complete_fn))) {
+            Ok(waiter) => {
+                io_batch.push(waiter);
+                Ok(())
+            }
+            Err(err) => Err(err.into()),
+        }
+    }
     fn readable_page_handle(&self) -> Result<Arc<VirtioFsOpenHandle>> {
         if let Some(open_handle) = self.open_handles.find_readable_handle() {
             return Ok(open_handle);
