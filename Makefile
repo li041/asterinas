@@ -110,6 +110,9 @@ CARGO_OSDK_COMMON_ARGS :=
 CARGO_OSDK_BUILD_ARGS := --kcmd-args="loglevel=$(LOG_LEVEL)"
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="earlycon"
 CARGO_OSDK_BUILD_ARGS += --kcmd-args="console=$(CONSOLE)"
+ifneq ($(EXTRA_KCMD_ARGS),)
+CARGO_OSDK_BUILD_ARGS += --kcmd-args="$(EXTRA_KCMD_ARGS)"
+endif
 CARGO_OSDK_TEST_ARGS :=
 
 ifeq ($(AUTO_TEST), conformance)

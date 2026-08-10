@@ -18,7 +18,7 @@
 use core::{
     cmp::min,
     ops::{Deref, Range},
-    sync::atomic::{AtomicIsize, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicUsize, Ordering},
 };
 
 use align_ext::AlignExt;
@@ -33,6 +33,16 @@ use crate::{
     prelude::*,
     vm::page_cache::{CachePage, CachePageExt, PageCacheBackend},
 };
+
+const DEFAULT_PAGE_BATCH_CAPACITY: usize = 32;
+const MAX_POC_PAGE_BATCH_CAPACITY: usize = 256;
+
+static POC_PAGE_BATCH_CAPACITY: AtomicU32 =
+    AtomicU32::new(DEFAULT_PAGE_BATCH_CAPACITY as u32);
+static POC_SKIP_READ_COPY: AtomicBool = AtomicBool::new(false);
+
+aster_cmdline::define_kv_param!("page_cache.poc_read_batch_pages", POC_PAGE_BATCH_CAPACITY);
+aster_cmdline::define_flag_param!("page_cache.poc_skip_read_copy", POC_SKIP_READ_COPY);
 
 mod options;
 
@@ -385,9 +395,6 @@ impl Vmo {
 
 // Implement the read/write methods for `Vmo`.
 impl Vmo {
-    /// Maximum number of pages collected per batch from the `XArray`.
-    const PAGE_BATCH_CAPACITY: usize = 32;
-
     /// Reads data from the VMO at `offset` into `writer`.
     pub fn read(&self, offset: usize, writer: &mut VmWriter) -> Result<()> {
         let read_len = writer.avail().min(self.size().saturating_sub(offset));
@@ -400,8 +407,10 @@ impl Vmo {
         let page_idx_range = get_page_idx_range(&range);
         let mut current_idx = page_idx_range.start;
         let mut page_offset = offset % PAGE_SIZE;
-        let mut page_batch =
-            Vec::with_capacity(min(page_idx_range.len(), Self::PAGE_BATCH_CAPACITY));
+        let configured_batch_capacity = POC_PAGE_BATCH_CAPACITY.load(Ordering::Relaxed) as usize;
+        let batch_capacity = configured_batch_capacity.clamp(1, MAX_POC_PAGE_BATCH_CAPACITY);
+        let mut page_batch = Vec::with_capacity(min(page_idx_range.len(), batch_capacity));
+        let should_skip_copy = POC_SKIP_READ_COPY.load(Ordering::Relaxed);
 
         while current_idx < page_idx_range.end {
             self.collect_pages(
@@ -412,7 +421,12 @@ impl Vmo {
             )?;
 
             for (_, page) in page_batch.iter() {
-                page.reader().skip(page_offset).read_fallible(writer)?;
+                if should_skip_copy {
+                    let skipped_len = (PAGE_SIZE - page_offset).min(writer.avail());
+                    writer.skip(skipped_len);
+                } else {
+                    page.reader().skip(page_offset).read_fallible(writer)?;
+                }
                 page_offset = 0;
             }
 
@@ -435,7 +449,7 @@ impl Vmo {
         let mut page_offset = offset % PAGE_SIZE;
         let mut page_batch = Vec::with_capacity(min(
             write_range.len().div_ceil(PAGE_SIZE),
-            Self::PAGE_BATCH_CAPACITY,
+            DEFAULT_PAGE_BATCH_CAPACITY,
         ));
 
         if !self.has_backend() {

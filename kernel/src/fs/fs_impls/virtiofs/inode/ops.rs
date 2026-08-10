@@ -2,7 +2,10 @@
 
 //! Methods and constructors for `VirtioFsInode`.
 
-use core::time::Duration;
+use core::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use aster_fuse::{
     EntryReply, FuseAttrReply, FuseDirEntry, FuseFileHandle, FuseOpenFlags, GetattrFlags, ReadReq,
@@ -40,6 +43,13 @@ use crate::{
 
 /// Use one page for each `FUSE_READDIR` request.
 const FUSE_READDIR_BUF_SIZE: u32 = 4096;
+
+static POC_SKIP_DIRECT_READ_COPY: AtomicBool = AtomicBool::new(false);
+
+aster_cmdline::define_flag_param!(
+    "virtiofs.poc_skip_direct_read_copy",
+    POC_SKIP_DIRECT_READ_COPY
+);
 
 impl VirtioFsInode {
     /// Reads file data through the page cache.
@@ -106,11 +116,15 @@ impl VirtioFsInode {
             data_buf.clone(),
         )?;
 
-        let mut segment_reader = data_buf.reader()?;
-        segment_reader.limit(copied);
-        segment_reader
-            .read_fallible(writer)
-            .map_err(|(err, _)| Error::from(err))?;
+        if POC_SKIP_DIRECT_READ_COPY.load(Ordering::Relaxed) {
+            writer.skip(copied);
+        } else {
+            let mut segment_reader = data_buf.reader()?;
+            segment_reader.limit(copied);
+            segment_reader
+                .read_fallible(writer)
+                .map_err(|(err, _)| Error::from(err))?;
+        }
 
         Ok(copied)
     }
