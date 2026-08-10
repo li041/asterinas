@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MPL-2.0
 
 set -euo pipefail
+export LC_ALL=C
 
 ASTERINAS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RESULT_ROOT=${POC_RESULT_ROOT:-${ASTERINAS_DIR}/benchmark_results/virtiofs-read-poc}
@@ -95,20 +96,27 @@ run_variant() {
     direct_bandwidth=$(extract_bandwidth "$output_file" 2)
     rm -f "$output_file"
 
+    for bandwidth in "$cached_bandwidth" "$direct_bandwidth"; do
+        if ! [[ "$bandwidth" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "invalid bandwidth value: $bandwidth" >&2
+            exit 1
+        fi
+    done
+
     jq -n \
-        --argjson cached "$cached_bandwidth" \
-        --argjson direct "$direct_bandwidth" \
+        --arg cached "$cached_bandwidth" \
+        --arg direct "$direct_bandwidth" \
         '[
             {
                 name: "Cached read bandwidth on Asterinas",
                 unit: "MB/s",
-                value: $cached,
+                value: ($cached | tonumber),
                 extra: "cached"
             },
             {
                 name: "Direct read bandwidth on Asterinas",
                 unit: "MB/s",
-                value: $direct,
+                value: ($direct | tonumber),
                 extra: "direct"
             }
         ]' > "${RESULT_ROOT}/${variant}.json"
