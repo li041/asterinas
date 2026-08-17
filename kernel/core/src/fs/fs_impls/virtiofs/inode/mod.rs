@@ -16,6 +16,7 @@ use aster_fuse::{
     DirentType, EntryReply, FUSE_ROOT_ID, FuseGeneration, FuseNodeId, FuseOpenFlags, LookupCount,
     ReleaseFlags, ReleaseKind, SetattrReq, SetattrValid,
     ops::{
+        init::FuseInitFlags2,
         link::{LinkOperation, LinkReq},
         lookup::LookupOperation,
         mkdir::{MkdirOperation, MkdirReq},
@@ -149,6 +150,15 @@ impl VirtioFsInode {
 
     fn fs_ref(&self) -> Arc<VirtioFs> {
         self.fs.upgrade().unwrap()
+    }
+
+    pub(super) fn allows_direct_io_mmap(&self, is_shared: bool) -> bool {
+        !is_shared
+            || self
+                .fs_ref()
+                .session()
+                .negotiated_flags2()
+                .contains(FuseInitFlags2::DIRECT_IO_ALLOW_MMAP)
     }
 
     pub(super) fn nodeid(&self) -> FuseNodeId {

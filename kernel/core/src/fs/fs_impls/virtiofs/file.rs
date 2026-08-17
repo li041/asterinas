@@ -12,8 +12,8 @@ use super::{
 use crate::{
     events::IoEvents,
     fs::{
-        file::{PerOpenFileOps, StatusFlags},
-        vfs::inode::FileOps,
+        file::{Mappable, PerOpenFileOps, StatusFlags},
+        vfs::inode::{FileOps, Inode},
     },
     prelude::*,
     process::signal::{PollHandle, Pollable},
@@ -135,6 +135,18 @@ impl FileOps for VirtioFsFile {
 }
 
 impl PerOpenFileOps for VirtioFsFile {
+    fn mappable(&self, is_shared: bool) -> Result<Mappable> {
+        if self.cache_policy == CachePolicy::Direct && !self.inode.allows_direct_io_mmap(is_shared)
+        {
+            return_errno_with_message!(Errno::ENODEV, "the file is not mappable");
+        }
+
+        self.inode
+            .page_cache()
+            .map(Mappable::Vmo)
+            .ok_or_else(|| Error::with_message(Errno::ENODEV, "the file is not mappable"))
+    }
+
     fn check_seekable(&self) -> Result<()> {
         if self
             .open_handle
