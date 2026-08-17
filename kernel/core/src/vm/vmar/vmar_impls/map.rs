@@ -236,7 +236,7 @@ impl<'a> VmarMapOptions<'a> {
             panic!("Cannot set `mappable` when `file` is already set");
         }
 
-        let mappable = file.mappable()?;
+        let mappable = file.mappable(self.is_shared)?;
         self.mappable = Some(mappable);
         self.file = Some(file);
 

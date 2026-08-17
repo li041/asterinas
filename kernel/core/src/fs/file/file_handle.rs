@@ -95,7 +95,7 @@ pub(crate) trait FileLike: Pollable + Send + Sync + Any {
     ///
     /// If this file has a corresponding mappable object of [`Mappable`],
     /// then it can be either an inode or an MMIO region.
-    fn mappable(&self) -> Result<Mappable> {
+    fn mappable(&self, _is_shared: bool) -> Result<Mappable> {
         // `ENODEV` means that "The underlying filesystem of the specified file does not support
         // memory mapping".
         // Reference: <https://man7.org/linux/man-pages/man2/mmap.2.html>.

@@ -498,7 +498,7 @@ impl PerOpenFileOps for FbHandle {
         true
     }
 
-    fn mappable(&self) -> Result<Mappable> {
+    fn mappable(&self, _is_shared: bool) -> Result<Mappable> {
         let iomem = self.framebuffer.io_mem();
         Ok(Mappable::IoMem(iomem.clone()))
     }
