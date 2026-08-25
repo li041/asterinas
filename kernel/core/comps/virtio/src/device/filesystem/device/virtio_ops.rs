@@ -22,6 +22,7 @@ use crate::{
         filesystem::{
             DEVICE_NAME,
             config::{FileSystemFeatures, VirtioFsConfig},
+            pool,
         },
     },
     queue::VirtQueue,
@@ -67,6 +68,8 @@ impl FileSystemDevice {
         if request_queue_count == 0 {
             return Err(VirtioDeviceError::UnsupportedConfig);
         }
+
+        pool::virtiofs_dma_arena_pool_init();
 
         let device = {
             let hiprio_queue = FsRequestQueue::new(Self::new_queue(

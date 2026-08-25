@@ -3,11 +3,11 @@
 //! Size-classed DMA buffer allocation.
 //!
 //! This module provides `SizeClassedDmaPool`, a size-class allocator backed by
-//! [`DmaPool`] segments for small buffers and [`DmaStream`] for large ones.
+//! [`DmaPool`] segments for small buffers and a shared DMA arena for large ones.
 
 use alloc::sync::Arc;
 
-use aster_util::mem_obj_slice::Slice;
+use aster_util::{dma_arena::DmaArenaAllocator, mem_obj_slice::Slice};
 use dma_pool::{DmaBuffer, DmaPool};
 use ostd::{
     Result,
@@ -17,6 +17,7 @@ use ostd::{
         io::util::{HasVmReaderWriter, VmReaderWriterResult},
     },
 };
+use spin::Once;
 
 use crate::dma_buf::DmaBuf;
 
@@ -41,6 +42,22 @@ const POOL_INIT_SIZE: usize = 8;
 /// Retains enough free segments for request bursts.
 const POOL_HIGH_WATERMARK: usize = 64;
 
+/// Preserves the previous worst-case budget of eight cached 1-MiB streams.
+const DMA_ARENA_SIZE_PAGES: usize = 8 * 1024 * 1024 / PAGE_SIZE;
+
+/// A pool of DMA arenas for buffers received from the device.
+static VIRTIOFS_DMA_ARENA_RPOOL: Once<Arc<DmaArenaAllocator<FromDevice>>> = Once::new();
+/// A pool of DMA arenas for buffers sent to the device.
+static VIRTIOFS_DMA_ARENA_WPOOL: Once<Arc<DmaArenaAllocator<ToDevice>>> = Once::new();
+
+/// Initializes the shared virtio-fs DMA arena pools.
+pub(super) fn virtiofs_dma_arena_pool_init() {
+    VIRTIOFS_DMA_ARENA_RPOOL
+        .call_once(|| Arc::new(DmaArenaAllocator::new(DMA_ARENA_SIZE_PAGES).unwrap()));
+    VIRTIOFS_DMA_ARENA_WPOOL
+        .call_once(|| Arc::new(DmaArenaAllocator::new(DMA_ARENA_SIZE_PAGES).unwrap()));
+}
+
 /// A size-classed DMA buffer allocator.
 #[derive(Debug)]
 pub(super) struct SizeClassedDmaPool<D: DmaDirection> {
@@ -56,27 +73,33 @@ impl<D: DmaDirection> SizeClassedDmaPool<D> {
         });
         Self { classes }
     }
+}
+
+impl SizeClassedDmaPool<FromDevice> {
+    fn target_pool() -> Option<&'static Arc<DmaArenaAllocator<FromDevice>>> {
+        VIRTIOFS_DMA_ARENA_RPOOL.get()
+    }
 
     /// Allocates a DMA buffer whose visible length is `len`.
-    fn alloc_buf(&self, len: usize) -> Result<Arc<Slice<DmaBuffer<D>>>> {
+    fn alloc_buf(&self, len: usize) -> Result<Arc<Slice<DmaBuffer<FromDevice>>>> {
         if len == 0 {
             return Err(ostd::Error::InvalidArgs);
         }
 
         let storage = if len <= MAX_CLASS_SIZE {
             let shift = MIN_SHIFT.max(len.next_power_of_two().trailing_zeros() as usize);
-            let segment = self.classes[shift - MIN_SHIFT].alloc_segment()?;
-            DmaBuffer::Pooled(segment)
+            DmaBuffer::Pooled(self.classes[shift - MIN_SHIFT].alloc_segment()?)
         } else {
-            let stream = DmaStream::alloc_uninit(len.div_ceil(PAGE_SIZE), false)?;
-            DmaBuffer::Direct(stream)
+            let pages = len.div_ceil(PAGE_SIZE);
+            match Self::target_pool().and_then(|pool| pool.alloc(pages)) {
+                Some(arena) => DmaBuffer::Arena(arena),
+                None => DmaBuffer::Direct(DmaStream::alloc_uninit(pages, false)?),
+            }
         };
 
         Ok(Arc::new(Slice::new(storage, 0..len)))
     }
-}
 
-impl SizeClassedDmaPool<FromDevice> {
     /// Allocates a DMA buffer for FUSE reply payloads.
     pub(super) fn alloc_reply_buf(&self, len: usize) -> Result<FuseReplyBuf> {
         self.alloc_buf(len).map(FuseReplyBuf)
@@ -84,6 +107,30 @@ impl SizeClassedDmaPool<FromDevice> {
 }
 
 impl SizeClassedDmaPool<ToDevice> {
+    fn target_pool() -> Option<&'static Arc<DmaArenaAllocator<ToDevice>>> {
+        VIRTIOFS_DMA_ARENA_WPOOL.get()
+    }
+
+    /// Allocates a DMA buffer whose visible length is `len`.
+    fn alloc_buf(&self, len: usize) -> Result<Arc<Slice<DmaBuffer<ToDevice>>>> {
+        if len == 0 {
+            return Err(ostd::Error::InvalidArgs);
+        }
+
+        let storage = if len <= MAX_CLASS_SIZE {
+            let shift = MIN_SHIFT.max(len.next_power_of_two().trailing_zeros() as usize);
+            DmaBuffer::Pooled(self.classes[shift - MIN_SHIFT].alloc_segment()?)
+        } else {
+            let pages = len.div_ceil(PAGE_SIZE);
+            match Self::target_pool().and_then(|pool| pool.alloc(pages)) {
+                Some(arena) => DmaBuffer::Arena(arena),
+                None => DmaBuffer::Direct(DmaStream::alloc_uninit(pages, false)?),
+            }
+        };
+
+        Ok(Arc::new(Slice::new(storage, 0..len)))
+    }
+
     /// Allocates a DMA buffer for FUSE requests.
     pub(super) fn alloc_request_buf(&self, len: usize) -> Result<FuseRequestBuf> {
         self.alloc_buf(len).map(FuseRequestBuf)

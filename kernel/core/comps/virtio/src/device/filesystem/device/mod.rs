@@ -34,7 +34,9 @@ use waiter::{FuseWaiter, ReplyBufs};
 
 pub use self::session::{AttrVersion, FuseSession};
 use crate::{
-    device::filesystem::pool::{FuseDataBuf, FuseReplyBuf, FuseRequestBuf, SizeClassedDmaPool},
+    device::filesystem::pool::{
+        self, FuseDataBuf, FuseReplyBuf, FuseRequestBuf, SizeClassedDmaPool,
+    },
     transport::DeviceTransport,
 };
 
@@ -228,19 +230,11 @@ impl FileSystemDevice {
             (ReplyExpectation::HeaderOnly, None) => {
                 Ok(ReplyBufs::new_header_only(self.alloc_reply_header_buf()?))
             }
-            (
-                ReplyExpectation::FixedPayload(payload_size)
-                | ReplyExpectation::VariablePayload(payload_size),
-                None,
-            ) => Ok(ReplyBufs::new_with_payload(
+            (ReplyExpectation::Payload(payload_size), None) => Ok(ReplyBufs::new_with_payload(
                 self.alloc_reply_header_buf()?,
                 self.alloc_reply_payload_buf(payload_size.get())?,
             )),
-            (
-                ReplyExpectation::FixedPayload(payload_size)
-                | ReplyExpectation::VariablePayload(payload_size),
-                Some(data_buf),
-            ) => {
+            (ReplyExpectation::Payload(payload_size), Some(data_buf)) => {
                 if payload_size.get() > data_buf.len() {
                     return Err(FuseError::BufferTooSmall);
                 }
