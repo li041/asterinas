@@ -323,12 +323,13 @@ impl DeviceInner {
                 complete_request
                     .bio_request
                     .bios()
-                    .flat_map(|bio| {
-                        bio.segments()
-                            .iter()
-                            .map(|segment| segment.inner_dma_slice())
-                    })
-                    .for_each(|dma_slice| dma_slice.sync_from_device().unwrap());
+                    .flat_map(|bio| bio.segments().iter().map(|segment| segment.dma_slice()))
+                    .for_each(|dma_slice| {
+                        dma_slice
+                            .mem_obj()
+                            .sync_from_device(dma_slice.offset().clone())
+                            .unwrap()
+                    });
             }
 
             // Completes the bio request
@@ -372,11 +373,9 @@ impl DeviceInner {
 
         let outputs = {
             let mut outputs: Vec<&Slice<_>> = Vec::with_capacity(bio_request.num_segments() + 1);
-            let dma_slices_iter = bio_request.bios().flat_map(|bio| {
-                bio.segments()
-                    .iter()
-                    .map(|segment| segment.inner_dma_slice())
-            });
+            let dma_slices_iter = bio_request
+                .bios()
+                .flat_map(|bio| bio.segments().iter().map(|segment| segment.dma_slice()));
             outputs.extend(dma_slices_iter);
             outputs.push(&resp_slice);
             outputs
@@ -441,13 +440,14 @@ impl DeviceInner {
         let inputs = {
             let mut inputs: Vec<&Slice<_>> = Vec::with_capacity(bio_request.num_segments() + 1);
             inputs.push(&req_slice);
-            let dma_slices_iter = bio_request.bios().flat_map(|bio| {
-                bio.segments()
-                    .iter()
-                    .map(|segment| segment.inner_dma_slice())
-            });
+            let dma_slices_iter = bio_request
+                .bios()
+                .flat_map(|bio| bio.segments().iter().map(|segment| segment.dma_slice()));
             for dma_slice in dma_slices_iter {
-                dma_slice.sync_to_device().unwrap();
+                dma_slice
+                    .mem_obj()
+                    .sync_to_device(dma_slice.offset().clone())
+                    .unwrap();
                 inputs.push(dma_slice);
             }
             inputs
