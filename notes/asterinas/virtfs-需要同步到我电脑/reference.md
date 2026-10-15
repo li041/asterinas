@@ -1,0 +1,11 @@
+- [fuse_change_attributes_i](https://elixir.bootlin.com/linux/v6.19.3/source/fs/fuse/inode.c#L328)
+	- 这个函数中有一部分逻辑是处理`writeback cache`的
+	-  `fuse_change_attributes_commom`是具体修改属性的地方
+		- 注意这里面没有更新size
+	- 对于regular file
+		- `old_size != attr -> size`
+			- `truncate_pagecache(inode, attr->size)`
+		- 如果`fc->auto_inval_data`
+			- 这个在`cache=auto`下为true
+			- 如果mtime修改了, 就`invalidate_inode_pages2`
+				- 这个函数是invalidate整个page cahe

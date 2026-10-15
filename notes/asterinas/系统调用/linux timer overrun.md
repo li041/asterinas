@@ -1,0 +1,2 @@
+- asterinas trap入口是`trap_handler`, 在`ostd/arch`下
+- asterinas中断处理走的是`call_irq_callback_functions`

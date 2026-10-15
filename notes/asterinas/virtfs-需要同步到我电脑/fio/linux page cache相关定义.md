@@ -1,0 +1,10 @@
+- [folio](https://elixir.bootlin.com/linux/v6.19.3/source/include/linux/mm_types.h#L357)
+	- 基本单元, `a contiguous set of bytes`
+- [address_space](https://codebrowser.dev/linux/linux/include/linux/fs.h.html#470)
+	- inode的page cache
+		- 字段 
+			- `wb_err`: 记录回写错误
+				- #todo 如何返回错误并处理?
+		- 接口定义[address_space_operations](https://codebrowser.dev/linux/linux/include/linux/fs.h.html#403)
+			- `readahead`批量提交连续foilo的读
+			- `write_begin/write_end`

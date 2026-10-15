@@ -1,0 +1,11 @@
+- 实际测试出来`direct_write`性能超过`cached_write`
+	- 原因是测试时启动`virtiofsd`没有加`-allow-direct-io`参数
+		- ![[Pasted image 20260730165000.png]]
+		- 那么是否应该在fio测试中加上以上参数
+			- kata默认没有加, 所以对于guest都是会潜在使用host的page cache
+			- guest并没有违背`direct_io`语义, 同时能享用host的page cache带来的性能提升
+			- 我认为在测试中采取默认参数没有问题
+- https://github.com/asterinas/kata-containers/blob/2cff9c22b579fece5b0299d5c2507e7289e75879/src/runtime/virtcontainers/virtiofsd.go#L183-L200
+	- ![[Pasted image 20260730164645.png]]
+		- 默认没有带`--allow-direct-io`
+		- 结果就是`O_DIRECT`并不会透传给host, host仍然使用page cache

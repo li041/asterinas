@@ -1,0 +1,1 @@
+- EntropyDevice的transport好像不需要加锁, 只需要内部可修改性就可以(最外层设备需要为Arc, transport在register_queue_callback的时候)

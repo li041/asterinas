@@ -1,0 +1,2 @@
+- linux![[Pasted image 20260130174509.png]]
+- ![[Pasted image 20260130174716.png]]

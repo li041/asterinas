@@ -1,0 +1,6 @@
+- `FUSE_AUTO_INVAL_DATA`在server的默认支持列表汇总, 无条件包含
+	- [默认支持的flags](https://github.com/oracle-cne/virtiofsd/blob/v1.13.3/src/server.rs#L926-L935)
+- `cache=`参数影响`FOPEN_KEEP_CACHE`
+	- 文件关闭后再次打开, guest不要因为重新打开而丢弃已有的data cache
+	- [CachePolicy](https://github.com/oracle-cne/virtiofsd/blob/v1.13.3/src/passthrough/mod.rs#L95-L123)
+	- 

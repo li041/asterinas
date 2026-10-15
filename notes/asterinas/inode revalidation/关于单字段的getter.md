@@ -1,0 +1,36 @@
+- linux在inode中使用各个字段保存信息![[Pasted image 20260622100202.png]]
+- 像`i_size_read`, `inode_get_atime/mtime/ctime`是直接从inode字段构造, 然后对应的setter也是
+	- [i_size_read](https://codebrowser.dev/linux/linux/include/linux/fs.h.html#1126)
+- linux的`falliable`接口只有`getattr`
+	-  VFS 的 vfs_getattr() 会走 inode->i_op->getattr()；如果文件系统没实现，就用 `generic_fillattr()` 从 inode cached fields 填 kstat：
+- linux的层次
+	-  cached field helpers：infallible，本地读缓存；
+	- `getattr / vfs_getattr`：fallible，负责 stat-like metadata 查询；
+	- 远端文件系统在自己的 getattr 里决定是否刷新。
+
+- 那对于需要刷新的单字段, e.g. fuse的`lseek`的`SEEK_END`实现
+	- size属性会主动更新, 下层发`FUSE_GETATTR`的请求, 然后更新缓存的`inode->i_size`字段, 再用缓存的`i_size_read(inode)`读取size![[Pasted image 20260622101234.png]]
+
+ - 对应到 Asterinas，我建议采用这样的设计
+	 - metadata() 对应 Linux 的 getattr/vfs_getattr，应该 fallible，并负责 user-visible full metadata 的刷新。
+		 - 我需要这个更改, 当我失效metadata的时候很多时候都是设置为过期, 不是每次都`FUSE_GETATTR`, 在xfstests中, 我遇到了一个测例在`cache=none`的时候能过, `cache=auto`不能过, 分析后是命中旧缓存的`nlink`的问题
+			 - `metadata`是面向user的接口, 而字段的`getter`主要面向内核
+	-  `size()/atime()/mtime()/ctime()` 更像 Linux 的 `i_size_read()/inode_get_*()`，可以保持 infallible cached getter。
+		  - 需要 freshness 的操作必须显式 revalidate 对应字段，比如 size-sensitive path revalidate size；不需要 freshness 的路径可以读 cached snapshot
+- 该设计
+	- 对于内核的路径允许cached attr, 对于大多数本地文件系统这个是很直观的 , vfs的共有默认路径都采用cached attr
+	- 对于需要freshness的操作由相应的开发者在对应的文件系统实现中显示调用, 这部分的复杂度并没有暴露出来
+	- 通过为Inode实现对应的trait, 本身就暗含了policy的语义
+	- 最接近linux的模式
+- alternative:
+	- 所有的`mutable attr` getter都改成falliable
+		- 严格要求内核所有相关调用都能获取到fresh的信息, 不存在使用staled attr的可能性
+			- 看起来对于本地文件系统开发者看起来有些奇怪, 调用这些接口需要返回`Result`, vfs中路径对应要处理, 至少有个`?`
+			- 对于getter原来命中缓存是个很快的动作, 如果加入revalidate的逻辑, 原有代码可能认为这部分不存在I/O, 可能会在某些地方引入`break atomic mode`, 可能需要对vfs框架比较熟悉并进行相应调整
+	- 给所有getter引入参数`policy`控制是否刷新, 这个是由caller显示选择
+		- 这个对应的linux的`getattr(request_mask, queue_flags)`![[Pasted image 20260622102837.png]]
+			- 根据参数控制
+				- 允许cached
+				- 强制刷新
+				- 以及默认的过期则刷新
+		- 未来可以考虑, 感觉目前不是很需要

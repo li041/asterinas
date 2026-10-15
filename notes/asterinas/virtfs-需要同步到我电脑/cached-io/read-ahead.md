@@ -1,0 +1,4 @@
+- `read-ahead`实现对于`self.open_file.is_some()`会提前return, virtio-fs实际不会走`read-ahead`路径, 因此只测试了ext2
+- 添加了[read-ahead pr](https://github.com/asterinas/asterinas/pull/3381)后对于ext2的fio cached read测试性能仅有1%波动
+	- 基线![[Pasted image 20260810113218.png]]
+	- apply后![[Pasted image 20260810112824.png]]

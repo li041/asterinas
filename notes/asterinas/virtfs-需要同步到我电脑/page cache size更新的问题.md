@@ -1,0 +1,6 @@
+- https://codebrowser.dev/linux/linux/fs/fuse/inode.c.html#328
+	- 持有`fi->lock`的时候获取`oldsize = inode->i_size`, 释放后再处理pagecache
+- [fuse_perform_write](https://codebrowser.dev/linux/linux/fs/fuse/file.c.html#fuse_perform_write)
+	- cache write在write through的情况下会走到`fuse_perform_write`
+	- 如果写越过了EOF, 则标记`FUSE_I_SIZE_UNSTABLE`
+		- 这个flag会在`fuse_change_attruibute`的时候阻止更新

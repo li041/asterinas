@@ -1,0 +1,7 @@
+- [man](https://man7.org/linux/man-pages/man2/pidfd_getfd.2.html)
+- `sys_pidfd_getfd(pidfd, targetfd, flags)`
+	- 在调用进程中分配一个新的文件描述符, 是`targetfd`的副本
+	- flags现在必须为0
+	- #todo ptrace的权限控制
+- [ptrace](https://man7.org/linux/man-pages/man2/ptrace.2.html)
+	- 

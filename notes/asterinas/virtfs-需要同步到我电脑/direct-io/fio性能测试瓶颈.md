@@ -1,0 +1,6 @@
+- 增加了测试, 对于virtio-fs direct read绕过中间DMA buffer到用户数据的拷贝![[Pasted image 20260810124808.png]]
+- baseline![[Pasted image 20260810125032.png]]
+- 性能测试结果 ![[Pasted image 20260810124932.png]]
+- 结合`diff block-size`的测试
+	- 基本确定`direct-read`的根因在于中间DMA buffer到用户数据的拷贝
+	- 对于内存分配部分的开销优化只能提升到`7000~8000MB/s`

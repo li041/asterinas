@@ -1,0 +1,13 @@
+- 向 PID 文件描述符所指的进程发送信号
+- [man7](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)
+- `pidfd_send_signal(int pidfd, int sig, siginto_t *_Nullable info, unsigned int flags)`
+	- 向`pidfd`指定的目标进程发送信号`sig`
+	- 如果`info`参数指向一个`siginfo_t`缓冲区, 则该缓冲区应按照[rt_sigqueueinfo(2)](https://man7.org/linux/man-pages/man2/rt_sigqueueinfo.2.html)中的描述填充, 如果`info`为`null`, 则等效于指定一个指向 `siginfo_t` 缓冲区的指针，该缓冲区的字段与使用 kill(2) 发送信号时隐式提供的值相匹配：
+	     -  _si_signo_ is set to the signal number;
+	     - _si_errno_ is set to 0;
+	     - _si_code_ is set to **SI_USER**;
+	     -  _si_pid_ is set to the caller's PID; and
+	     -  _si_uid_ is set to the caller's real user ID.
+- `siginfo`的定义
+	- [sigaction man7](https://man7.org/linux/man-pages/man2/sigaction.2.html)
+-  #todo 需要补`kernel/src/signal/signals`

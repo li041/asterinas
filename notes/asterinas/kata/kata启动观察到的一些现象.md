@@ -1,0 +1,4 @@
+- 没有启动DAX
+	- ![[Pasted image 20260306162854.png]]
+- 没有notification feature
+	- ![[Pasted image 20260306163035.png]]

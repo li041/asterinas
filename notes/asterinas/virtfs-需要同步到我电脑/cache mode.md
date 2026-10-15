@@ -1,0 +1,14 @@
+  - virtiofsd 的 `CachePolicy` 实际行为在`src/passthrough/mod.rs`：
+	  - never
+	      - 普通文件使用 DIRECT_IO
+	      - 不使用 guest 文件数据缓存
+	  - metadata
+	      - 普通文件 DIRECT_IO
+	      - 目录允许 CACHE_DIR | KEEP_CACHE
+	      - 保留 metadata、dentry、目录缓存
+	  - always
+	      - 普通文件使用 KEEP_CACHE
+	      - 允许 guest 持久缓存文件数据
+	  - auto
+	      - 不额外设置 DIRECT_IO 或 KEEP_CACHE
+	      - 使用 close-to-open 一致性

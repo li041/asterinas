@@ -1,0 +1,325 @@
+{
+  "main": {
+    "id": "411a1b370f529f53",
+    "type": "split",
+    "children": [
+      {
+        "id": "a7845eb2eff69595",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "8d5b74cb0b3e13ff",
+            "type": "leaf",
+            "pinned": true,
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "周报/8.24.md",
+                "mode": "source",
+                "source": false
+              },
+              "pinned": true,
+              "icon": "lucide-file",
+              "title": "8.24"
+            }
+          },
+          {
+            "id": "061181530ca63525",
+            "type": "leaf",
+            "pinned": true,
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "OSDK/virtiofs启动和回收.md",
+                "mode": "source",
+                "source": false
+              },
+              "pinned": true,
+              "icon": "lucide-file",
+              "title": "virtiofs启动和回收"
+            }
+          },
+          {
+            "id": "17252543caa6b390",
+            "type": "leaf",
+            "pinned": true,
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "virtfs-需要同步到我电脑/cache mode.md",
+                "mode": "source",
+                "source": false
+              },
+              "pinned": true,
+              "icon": "lucide-file",
+              "title": "cache mode"
+            }
+          },
+          {
+            "id": "efda5caf8cb73086",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "virtfs-需要同步到我电脑/xfstests/block.list.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "block.list"
+            }
+          },
+          {
+            "id": "faa2df1f8c4a8970",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "virtfs-需要同步到我电脑/cached-io/virtio-fs page cache writeback.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "virtio-fs page cache writeback"
+            }
+          },
+          {
+            "id": "092e9af6d8d21f6a",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "pku/计算机体系结构/3. Dynamic Scheduling.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "3. Dynamic Scheduling"
+            }
+          }
+        ],
+        "currentTab": 5
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "30745b5215f98690",
+    "type": "split",
+    "children": [
+      {
+        "id": "ecb4bd695a4b3ea8",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "fa5a0fd24dd9cd18",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "文件列表"
+            }
+          },
+          {
+            "id": "0ee62bccdffc25a7",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "discu",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "搜索"
+            }
+          },
+          {
+            "id": "35b47141cc99ed7d",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "书签"
+            }
+          },
+          {
+            "id": "5683b1cdd09da833",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "inode revalidation/关于单字段的getter.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "关于单字段的getter"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 320.5
+  },
+  "right": {
+    "id": "37efcd7e83625d87",
+    "type": "split",
+    "children": [
+      {
+        "id": "01e3c3369760b834",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1c1860e43c65c879",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "反向链接"
+            }
+          },
+          {
+            "id": "97cfb35e4939008d",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "出链"
+            }
+          },
+          {
+            "id": "eaf80cc441187beb",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "标签"
+            }
+          },
+          {
+            "id": "97fcd039071825f8",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "添加笔记属性"
+            }
+          },
+          {
+            "id": "2ad49d0dca8c1936",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "大纲"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "bases:新建数据库": false,
+      "switcher:打开快速切换": false,
+      "graph:查看关系图谱": false,
+      "canvas:新建白板": false,
+      "daily-notes:打开/创建今天的日记": false,
+      "templates:插入模板": false,
+      "command-palette:打开命令面板": false
+    }
+  },
+  "active": "092e9af6d8d21f6a",
+  "lastOpenFiles": [
+    "virtfs-需要同步到我电脑/cache mode.md",
+    "virtfs-需要同步到我电脑/cached-io/virtio-fs page cache writeback.md",
+    "pku/计算机体系结构/3. Dynamic Scheduling.md",
+    "pku/robonix.md",
+    "pku/计算机体系结构",
+    "osdk-support-review.md",
+    "codex review建议.md",
+    "comments.md",
+    "devtmpfs.md",
+    "hvisor.md",
+    "issue.md",
+    "page cache接口适配.md",
+    "pr commit.md",
+    "pr-review-skill使用.md",
+    "README.md",
+    "review.md",
+    "todo list.md",
+    "virtio-rng.md",
+    "virtio-crypto prompt.md",
+    "virtiofsd实现.md",
+    "virtfs-需要同步到我电脑/xfstests/block.list.md",
+    "virtfs-需要同步到我电脑/fio/page cache.md",
+    "virtfs-需要同步到我电脑/fio/linux page cache相关定义.md",
+    "virtfs-需要同步到我电脑/fio/kata默认给的virtiofsd参数.md",
+    "virtfs-需要同步到我电脑/fio/fio测试适配virtio-fs.md",
+    "virtfs-需要同步到我电脑/direct-io/fio性能测试瓶颈.md",
+    "virtfs-需要同步到我电脑/direct-io/bio分配.md",
+    "pku/算法",
+    "Pasted image 20260914104951.png",
+    "pku",
+    "OSDK",
+    "未命名",
+    "Pasted image 20260817114514.png",
+    "Pasted image 20260817114425.png",
+    "Pasted image 20260817114329.png",
+    "virtfs-需要同步到我电脑/xfstests",
+    "周报",
+    "Pasted image 20260810125032.png",
+    "Pasted image 20260810125014.png",
+    "Pasted image 20260810124932.png",
+    "Pasted image 20260810124808.png",
+    "Pasted image 20260810113218.png",
+    "Pasted image 20260810112824.png",
+    "virtfs-需要同步到我电脑/cached-io",
+    "virtfs-需要同步到我电脑/bio/未命名",
+    "virtfs-需要同步到我电脑/bio"
+  ]
+}

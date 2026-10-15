@@ -1,0 +1,4 @@
+- ![[Pasted image 20260309111653.png]]
+	- [x] 我正常前端代码发opendir确实是`queue_event`, 似乎是virtiofsd的bug, 我的`fuse_forget`发到`hiprio_queue`然后触发对应试讲, 但是这里缺少`Received request: opcode=Forget`的回复
+- ![[Pasted image 20260323153757.png]]
+	- 上面有函数拿着锁, 需要检查下

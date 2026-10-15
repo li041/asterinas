@@ -1,0 +1,4 @@
+- https://github.com/asterinas/asterinas/issues/2866
+	- pidfd实现
+- signal没实现全
+	- 参考linux`/home/xinhao/linux/include/uapi/asm-generic/siginfo.h`
